@@ -257,6 +257,6 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/${{ env.PRIVATE_REPO }}/statuses/${{ inputs.sha }}" \
-            -f state="$STATE" -f context=ci -f description="$DESC" -f target_url="$URL" \
+            -f state="$STATE" -f context=shell-ci -f description="$DESC" -f target_url="$URL" \
             > /dev/null
           echo "status $STATE posted to ${{ inputs.sha }}"
