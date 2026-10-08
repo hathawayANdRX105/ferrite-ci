@@ -1,0 +1,262 @@
+# ferrite 公开壳仓 CI：源码在私有仓 hathawayANdRX105/ferrite，由私有仓 ci-dispatch 触发。
+# lint 与 test 并行；test 关卡启动 PostgreSQL，数据库测试真实执行。
+# PR（pr 入参非空）走 testless 快关，main/手动 full=true 走全量。
+# 缓存：PR 只读；main 与 full 写回（sccache 键按天轮换）。详见 README。
+
+name: ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: '待测私有仓 commit SHA'
+        required: true
+      pr:
+        description: 'PR 编号（空 = main push / 手动触发）'
+        required: false
+        default: ''
+      base:
+        description: 'PR base 分支名'
+        required: false
+        default: 'main'
+      full:
+        description: 'true = 强制全量测试'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ inputs.pr != '' && format('pr-{0}', inputs.pr) || 'main' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PRIVATE_REPO: hathawayANdRX105/ferrite
+
+jobs:
+  # 格式化与静态检查，不依赖数据库。
+  lint-check:
+    runs-on: ubuntu-latest
+    # 壳仓缓存冷启（清缓存后首个 run）全量编译需要余量。
+    timeout-minutes: 45
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      # ui-kit 契约测试要真实链接，mold 不可省；apt 加固同 test 关卡。
+      - name: 装 mold
+        run: |
+          set -euo pipefail
+          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
+      - name: Cache 依赖（restore-only，写回归写入方 run）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（lint 角色，restore-only）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-lint-${{ runner.os }}-v0.10.0-
+            sccache-test-${{ runner.os }}-v0.10.0-
+
+      - name: 装 Bun（web 样式构建链）
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # 样式类守卫（check-style-classes.mjs）+ 双入口 CSS 构建在 CI 硬拦：
+      # 未登记页面类 / kit 配方漂移在这里红，不等浏览器冒烟。
+      - name: web 样式守卫 + CSS 构建
+        run: |
+          set -euo pipefail
+          (cd apps/web && bun install --frozen-lockfile && bun run css)
+          (cd apps/kit-demo && bun install --frozen-lockfile && bun run css)
+
+      # ui-kit 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
+      # const（TOKEN_GROUPS）与 asset CSS 的 diff，快关会漏选 theme/style 契约。
+      - name: ui-kit 契约测试
+        timeout-minutes: 15
+        run: cargo test -p ui-kit --tests
+
+      # 迁移布局守卫（无 PG 可跑）：版本前缀重复 / 正文混入 git log 行。
+      # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
+      # 从快关漏过、把 main 弄红，这里无条件跑死。
+      - name: db 迁移布局守卫
+        timeout-minutes: 10
+        run: cargo test -p db --test migrations_layout
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy（全量关卡）
+        run: cargo clippy --all-targets -- -D warnings
+
+      # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
+      # always()：失败 run 的编译产物同样有复用价值。
+      - name: 回填 cargo 缓存（仅写入方）
+        if: always() && (inputs.pr == '' || inputs.full == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: 回填 sccache 缓存（仅写入方，日键）
+        if: always() && (inputs.pr == '' || inputs.full == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+
+  # 测试连接临时 PostgreSQL；db_bootstrap 在测试启动时应用迁移。
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: ferrite
+          POSTGRES_PASSWORD: ferrite
+          POSTGRES_DB: ferrite
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ferrite -d ferrite"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://ferrite:ferrite@localhost:5432/ferrite
+      FERRITE_E2E_DATABASE_URL: postgres://ferrite:ferrite@localhost:5432/ferrite
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 装 just（justfile 配方入口）
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          just --version
+
+      - name: 装 mold
+        # apt 镜像曾整段挂死到 job 超时；显式重试 + 硬超时，让故障快速失败可重跑。
+        run: |
+          set -euo pipefail
+          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
+      - name: Cache 依赖（restore-only，写回归写入方 run）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（test 角色，restore-only）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-test-${{ runner.os }}-v0.10.0-
+            sccache-lint-${{ runner.os }}-v0.10.0-
+
+      - name: 装 testless（test-fast 的影响分析器，仅 PR 快关需要）
+        if: inputs.pr != '' && inputs.full != 'true'
+        run: cargo install testless --locked
+
+      # PR 快关需要本地 origin/<base> ref（checkout sha 是 detached）。
+      - name: 取 base 分支（testless 影响分析用）
+        if: inputs.pr != '' && inputs.full != 'true'
+        run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+
+      # PR（pr 非空且非 full）→ test-fast（testless 影响分析；异常 / 零命中自动降级全量）。
+      # main push / 手动 full=true → 全量 just test。
+      - name: 测试
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ] && [ "${{ inputs.full }}" != "true" ]; then
+            echo ">>> PR 快关：just test-fast（testless diff 影响分析）"
+            just test-fast origin/${{ inputs.base }}
+          else
+            echo ">>> 全量关卡：just test"
+            just test
+          fi
+
+      - name: 回填 cargo 缓存（仅写入方）
+        if: always() && (inputs.pr == '' || inputs.full == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: 回填 sccache 缓存（仅写入方，日键）
+        if: always() && (inputs.pr == '' || inputs.full == 'true')
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+
+  # 聚合两关卡结果，写 commit status `ci` 回私有仓 commit。
+  report:
+    needs: [lint-check, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 回写 commit status
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          STATE: "${{ needs.lint-check.result == 'success' && needs.test.result == 'success' && 'success' || 'failure' }}"
+          DESC: "${{ format('ferrite-ci: lint {0}, test {1}', needs.lint-check.result, needs.test.result) }}"
+          URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/${{ inputs.sha }}" \
+            -f state="$STATE" -f context=ci -f description="$DESC" -f target_url="$URL" \
+            > /dev/null
+          echo "status $STATE posted to ${{ inputs.sha }}"
