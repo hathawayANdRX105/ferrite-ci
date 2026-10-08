@@ -4,6 +4,13 @@
 # 公开壳仓不落 artifact —— 私有代码的编译产物不进公开仓。
 #   tag 非空 且 dry_run=false → 创建 Release（asset + notes 都写主仓）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
+#
+# 三形态三 asset（方案 A：一条版本线，一个 tag 挂三份产物；形态别名定义在私有仓
+# apps/api/Cargo.toml，本 workflow 只消费）：
+#   ferrite-local   --no-default-features --features ferrite-local   （个人 relay，无 billing/mcp）
+#   ferrite-tavern  --no-default-features --features ferrite-tavern  （用户酒馆，仅 tavern）
+#   ferrite-server  --no-default-features --features ferrite-server  （服务器，tavern+billing+mcp）
+# 三形态共用同一 tag、同一份 release notes，notes 不按形态分裂。
 name: release
 
 on:
@@ -31,8 +38,9 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # LTO fat + codegen-units=1 冷启构建需要余量。
-    timeout-minutes: 60
+    # LTO fat + codegen-units=1 冷启构建需要余量；三形态是三次独立 release 构建
+    # （feature 图不同、无法复用产物），其中 local/tavern 两条 sccache 轨冷启，留 90。
+    timeout-minutes: 90
     steps:
       - name: 检出私有源码（PAT）
         uses: actions/checkout@v4
@@ -79,8 +87,24 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
 
-      - name: 编译 release 二进制（默认 relay 形态：relay+billing+mcp，不含 tavern）
-        run: cargo build --release -p api --no-default-features --features billing,mcp
+      - name: 编译三形态二进制
+        run: |
+          set -euo pipefail
+          # 三形态 feature 图不同 → 各自独立 cargo build，且 --target-dir 必须隔离
+          # （共用 target 会让三次 build 覆盖同一个 target/release/ferrite）。
+          # --no-default-features 每条都不能省：省掉它 default（= ferrite-server）
+          # 仍生效，三条会全变成 server 形态。
+          build_one() {
+            local name="$1"; shift
+            echo ">>> cargo build ferrite-${name}: $*"
+            cargo build --release -p api --target-dir "target/rel-${name}" "$@"
+            cp "target/rel-${name}/release/ferrite" "out-bin/ferrite-${name}"
+          }
+          mkdir -p out-bin
+          build_one local   --no-default-features --features ferrite-local
+          build_one tavern  --no-default-features --features ferrite-tavern
+          build_one server  --no-default-features --features ferrite-server
+          ls -l out-bin
 
       - name: 打包
         run: |
@@ -123,17 +147,23 @@ jobs:
             section "Fixed"            '^(fix|perf)(\([^)]*\))?:'
             section "Removed"          '^revert(\([^)]*\))?:'
           } > release-notes.md
-          mkdir -p "dist/${DIST}"
-          cp target/release/ferrite "dist/${DIST}/"
-          # 安全配置示例（占位符/注释字段）；compose 专用的
-          # deploy/config/config.toml 含 compose 服务名/口令，不打包
-          cp deploy/config/config.toml.example "dist/${DIST}/config.toml.example"
-          tar -czf "dist/${DIST}-linux-x86_64.tar.gz" -C dist "${DIST}"
+          # 三份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
+          # 安全配置示例（占位符/注释字段；compose 专用的 deploy/config/config.toml
+          # 含 compose 服务名/口令，不打包）。
+          mkdir -p dist
+          for form in local tavern server; do
+            ADIST="ferrite-${form}-${DIST#ferrite-}"
+            mkdir -p "dist/${ADIST}"
+            cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
+            cp deploy/config/config.toml.example "dist/${ADIST}/config.toml.example"
+            tar -czf "dist/${ADIST}-linux-x86_64.tar.gz" -C dist "${ADIST}"
+            rm -rf "dist/${ADIST}"
+          done
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "dist=${DIST}" >> "$GITHUB_OUTPUT"
           # 只输出哈希与体积（不 echo 源码/二进制内容）
-          sha256sum "dist/${DIST}-linux-x86_64.tar.gz"
-          du -h "dist/${DIST}-linux-x86_64.tar.gz"
+          sha256sum dist/*.tar.gz
+          du -h dist/*.tar.gz
         id: pkg
 
       - name: 发布 GitHub Release 到私有主仓
@@ -142,8 +172,13 @@ jobs:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
         run: |
           set -euo pipefail
+          # 资产名 = ferrite-<形态>-<版本段>-linux-x86_64.tar.gz（版本段 = tag 去 ferrite- 前缀）
+          DIST="${{ steps.pkg.outputs.dist }}"
+          SPEC="${DIST#ferrite-}"
           gh release create "${{ inputs.tag }}" \
-            "dist/${{ steps.pkg.outputs.dist }}-linux-x86_64.tar.gz" \
+            "dist/ferrite-local-${SPEC}-linux-x86_64.tar.gz" \
+            "dist/ferrite-tavern-${SPEC}-linux-x86_64.tar.gz" \
+            "dist/ferrite-server-${SPEC}-linux-x86_64.tar.gz" \
             -R "${{ env.PRIVATE_REPO }}" \
             --title "${{ steps.pkg.outputs.dist }}" \
             --notes-file release-notes.md
