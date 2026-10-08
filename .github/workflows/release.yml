@@ -1,0 +1,160 @@
+# ferrite 发布壳工作流：私有仓 hathawayANdRX105/ferrite 推 ferrite-v* tag（或手动派发）
+# 由主仓 ferrite-release.yml 派发触发（on 只有 workflow_dispatch，同 ci.yml 不变量）。
+# PAT 检出私有源码构建，产物直接发成私有主仓的 GitHub Release；
+# 公开壳仓不落 artifact —— 私有代码的编译产物不进公开仓。
+#   tag 非空 且 dry_run=false → 创建 Release（asset + notes 都写主仓）
+#   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的私有仓 commit / 分支'
+        required: true
+      tag:
+        description: '要发布的 tag（ferrite-v*，空 = 不发布）'
+        required: false
+        default: ''
+      dry_run:
+        description: 'true = 只编译打包，不创建 Release'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PRIVATE_REPO: hathawayANdRX105/ferrite
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # LTO fat + codegen-units=1 冷启构建需要余量。
+    timeout-minutes: 60
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 装 mold
+        # apt 曾整段挂死；显式重试 + 硬超时，让故障快速失败可重跑（同 ci.yml）。
+        run: |
+          set -euo pipefail
+          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
+      - name: Cache 依赖（restore-only，写回归写入方 ci run）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（release 角色，restore-only 回退到 test/lint 日键）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-release-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-release-${{ runner.os }}-v0.10.0-
+            sccache-test-${{ runner.os }}-v0.10.0-
+            sccache-lint-${{ runner.os }}-v0.10.0-
+
+      - name: 编译 release 二进制（默认 relay 形态：relay+billing+mcp，不含 tavern）
+        run: cargo build --release -p api --no-default-features --features billing,mcp
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          if [[ -n "$TAG" ]]; then
+            # tag: ferrite-v<M.R.P>-g<hash>；三形态统一版本线（见 version-stats skill）
+            SPEC="${TAG#ferrite-v}"               # M.R.P-g<hash>
+            VER="${SPEC%%-g*}"                    # M.R.P
+            DIST="ferrite-v${VER}-g${SPEC#*-g}"   # = TAG
+          else
+            VER="dev-$(git rev-parse --short HEAD)"
+            DIST="ferrite-${VER}"
+          fi
+          # Release notes：只收用户可感知 commit，五组过滤（参照 oh-my-pi；口径 = version-stats skill）。
+          # 在发版 commit 的父上找上一个 ferrite-v* tag，避免 describe 命中发版点自身导致区间为空
+          if git rev-parse --quiet --verify 'HEAD^' >/dev/null; then
+            LAST=$(git describe --match 'ferrite-v*' --tags --abbrev=0 'HEAD^' 2>/dev/null) || LAST=""
+          else
+            LAST=""
+          fi
+          if [ -n "$LAST" ]; then RANGE="$LAST..HEAD"; else RANGE="HEAD"; fi
+          SUBJ=$(git log $RANGE --no-merges --format='%s')
+          {
+            echo "${DIST}"
+            echo
+            section() {
+              local lines
+              lines=$(grep -E "$2" <<< "$SUBJ" || true)
+              if [ -n "$lines" ]; then
+                echo "### $1"
+                echo
+                sed 's/^/- /' <<< "$lines"
+                echo
+              fi
+            }
+            section "Breaking Changes" '^[a-z]+(\([^)]*\))?!:'
+            section "Added"            '^feat(\([^)]*\))?:'
+            section "Changed"          '^refactor(\([^)]*\))?:'
+            section "Fixed"            '^(fix|perf)(\([^)]*\))?:'
+            section "Removed"          '^revert(\([^)]*\))?:'
+          } > release-notes.md
+          mkdir -p "dist/${DIST}"
+          cp target/release/ferrite "dist/${DIST}/"
+          # 安全配置示例（占位符/注释字段）；compose 专用的
+          # deploy/config/config.toml 含 compose 服务名/口令，不打包
+          cp deploy/config/config.toml.example "dist/${DIST}/config.toml.example"
+          tar -czf "dist/${DIST}-linux-x86_64.tar.gz" -C dist "${DIST}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "dist=${DIST}" >> "$GITHUB_OUTPUT"
+          # 只输出哈希与体积（不 echo 源码/二进制内容）
+          sha256sum "dist/${DIST}-linux-x86_64.tar.gz"
+          du -h "dist/${DIST}-linux-x86_64.tar.gz"
+        id: pkg
+
+      - name: 发布 GitHub Release 到私有主仓
+        if: inputs.tag != '' && inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ inputs.tag }}" \
+            "dist/${{ steps.pkg.outputs.dist }}-linux-x86_64.tar.gz" \
+            -R "${{ env.PRIVATE_REPO }}" \
+            --title "${{ steps.pkg.outputs.dist }}" \
+            --notes-file release-notes.md
+
+      - name: dry run 收尾提示
+        if: inputs.tag == '' || inputs.dry_run == 'true'
+        run: echo "未发布 Release（tag 为空或 dry_run=true），构建产物随 runner 销毁；发版请推 ferrite-v* tag"
+
+      - name: 回填 sccache 缓存（release 角色，日键）
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-release-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
