@@ -9,8 +9,9 @@ hathawayANdRX105/ferrite（私有源码仓）的 CI 执行壳：公开仓的 Act
    传入待测 commit 的 `sha`（以及 `pr`、`base`、`full`）。
 2. 本仓 workflow 用 `FERRITE_PAT`（fine-grained，Contents: Read-only + Commit statuses: Write）
    检出私有仓对应 commit，跑 lint-check 与 test 两个并行关卡。
-3. `report` 关卡把聚合结果以 commit status（context `ci`）写回私有仓 commit；
-   私有仓 branch protection 要求该 context，红灯挡合并。
+3. `report` 关卡把聚合结果以 commit status（context `shell-ci`）写回私有仓 commit；
+   私有仓 branch protection 只认该 context，红灯挡合并（`ci` 这个名字让给了
+   Actions app 的同名 check，本仓 PAT 回写满足不了）。
 
 ## Secrets
 

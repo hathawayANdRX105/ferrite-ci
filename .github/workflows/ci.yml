@@ -112,6 +112,20 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p db --test migrations_layout
 
+      # 形态别名回归网：apps/api 的 ferrite-{local,tavern,server} 三别名各 check 一次。
+      # default（= ferrite-server）已被上面的 clippy --all-targets 覆盖，但
+      # --no-default-features 的三条没有任何测试会编译，别名被改坏（如误把
+      # tavern 塞进 ferrite-local）只有这里能红——cargo 的 feature 统一（#10266）
+      # 也让它们绝不能进共享 crate。
+      - name: 形态别名检查（ferrite-local / ferrite-tavern / ferrite-server）
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          for form in local tavern server; do
+            echo ">>> cargo check -p api --no-default-features --features ferrite-${form}"
+            cargo check -p api --no-default-features --features "ferrite-${form}"
+          done
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
