@@ -168,8 +168,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: 装 just（justfile 配方入口）
+        # just.systems CDN 曾 403 挂掉整个 test job；改走 GitHub release +
+        # runner 自带 token（免匿名 API 限流）。
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          set -euo pipefail
+          tag=$(gh api repos/casey/just/releases/latest --jq .tag_name)
+          gh release download "$tag" -R casey/just \
+            -p "just-*x86_64-unknown-linux-musl.tar.gz" -O - | tar xzf - just
+          sudo install -m755 just /usr/local/bin/just
           just --version
 
       - name: 装 mold
