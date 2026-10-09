@@ -1,6 +1,6 @@
-# ferrite 发布壳工作流：私有仓 hathawayANdRX105/ferrite 推 ferrite-v* tag（或手动派发）
+# ferrite 发布壳工作流：私有主仓（地址只在下方 PRIVATE_REPO env 出现）推 ferrite-v* tag（或手动派发），
 # 由主仓 ferrite-release.yml 派发触发（on 只有 workflow_dispatch，同 ci.yml 不变量）。
-# PAT 检出私有源码构建，产物直接发成私有主仓的 GitHub Release；
+# 检出凭据拉私有源码构建，产物直接发成主仓的 GitHub Release；
 # 公开壳仓不落 artifact —— 私有代码的编译产物不进公开仓。
 #   tag 非空 且 dry_run=false → 创建 Release（asset + notes 都写主仓）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁

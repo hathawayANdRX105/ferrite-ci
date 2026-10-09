@@ -1,7 +1,7 @@
-# ferrite 公开壳仓 CI：源码在私有仓 hathawayANdRX105/ferrite，由私有仓 ci-dispatch 触发。
+# ferrite 公开壳仓 CI：源码在私有主仓（地址只在下方 PRIVATE_REPO env 出现），由主仓 ci-dispatch 触发。
 # lint 与 test 并行；test 关卡启动 PostgreSQL，数据库测试真实执行。
 # PR（pr 入参非空）走 testless 快关，main/手动 full=true 走全量。
-# 缓存：PR 只读；main 与 full 写回（sccache 键按天轮换）。详见 README。
+# 缓存与用法详见 .github/README.md。
 
 name: ci
 
@@ -263,7 +263,7 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
-  # 聚合两关卡结果，写 commit status `ci` 回私有仓 commit。
+  # 聚合两关卡结果，写 commit status `shell-ci` 回主仓 commit。
   report:
     needs: [lint-check, test]
     if: always()
