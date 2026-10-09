@@ -33,10 +33,14 @@ on:
 # token 不自动注入 env，仅下方发布步骤显式引用，构建步骤拿不到。
 permissions:
   contents: write
+  packages: write   # GHCR 推送（ferrite-api / ferrite-admin-web 镜像）
 
 env:
   CARGO_TERM_COLOR: always
   PRIVATE_REPO: hathawayANdRX105/ferrite
+  # GHCR 命名空间：镜像挂在维护者账号下，别人才能 ghcr.io/hathawayANdRX105/... 拉取。
+  # deploy/compose.yml 的 image 字段必须与这里一致。
+  PRIVATE_REPO_OWNER: hathawayANdRX105
 
 jobs:
   release:
@@ -152,13 +156,19 @@ jobs:
           } > release-notes.md
           # 三份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
           # 安全配置示例（占位符/注释字段；compose 专用的 deploy/config/config.toml
-          # 含 compose 服务名/口令，不打包）。
+          # 含 compose 服务名/口令，不打包）+ prompt 语料。
+          # 语料必须是运行时资产：渠道探活（channel_test）从
+          # config/prompt-templates.jsonl 读提问语料，二进制不内嵌它
+          # （见 control_plane::prompt_templates::load_templates）。
+          # 漏打它 → 裸机部署解压即用、但探活报「no prompt template available」。
+          # config.toml.example 文案已说明默认读 ./config/prompt-templates.jsonl。
           mkdir -p dist
           for form in local tavern server; do
             ADIST="ferrite-${form}-${DIST#ferrite-}"
-            mkdir -p "dist/${ADIST}"
+            mkdir -p "dist/${ADIST}/config"
             cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
-            cp deploy/config/config.toml.example "dist/${ADIST}/config.toml.example"
+            cp config/prompt-templates.jsonl "dist/${ADIST}/config/"
+            cp deploy/config/config.toml.example "dist/${ADIST}/config/config.toml.example"
             tar -czf "dist/${ADIST}-linux-x86_64.tar.gz" -C dist "${ADIST}"
             rm -rf "dist/${ADIST}"
           done
@@ -168,6 +178,55 @@ jobs:
           sha256sum dist/*.tar.gz
           du -h dist/*.tar.gz
         id: pkg
+
+      # ---- 容器镜像（GHCR）----
+      # deploy/ 的两个 Dockerfile 早已按形态构建（deploy/api/Dockerfile 的
+      # FEATURES build-arg、deploy/web/Dockerfile 的 dx build），此处只是把它们
+      # 接到发布链上，让「别人 docker compose up 就能用」成立——此前
+      # deploy/compose.yml 引的 ghcr.io/newxapi/* 是第三方组织的私有镜像，
+      # 既非本项目产物也拉不到，等于 compose 的「快速跑」是坏的。
+      #
+      # tag 口径与 compose 期望一致：compose.yml 读 :latest（= server 全功能形态），
+      # compose.personal.yml 读 :local；:tavern 按 deploy/README.md 的形态表补齐。
+      # 每形态额外打一个版本 tag，便于回溯某个 release 用了哪个镜像。
+      #
+      # 登录用 FERRITE_PAT（与主仓 Release 同步同一个 PAT）：镜像要挂在维护者账号下
+      # 才能让别人拉；用 github.token 会挂在壳仓名下，而壳仓是公开壳、不是产物归属。
+      # 依赖 FERRITE_PAT 具 write:packages 权限——该范围无法在此仓内自证，
+      # 首次推送后需确认 ghcr.io/hathayaANdRX105/ferrite-api 的 tags 列表。
+      - name: 登录 GHCR
+        if: inputs.tag != '' && inputs.dry_run != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ env.PRIVATE_REPO_OWNER }}
+          password: ${{ secrets.FERRITE_PAT }}
+
+      - name: 构建并推送容器镜像
+        if: inputs.tag != '' && inputs.dry_run != 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          SPEC="${TAG#ferrite-v}"
+          # compose 的 tag 契约：server → :latest，其余用形态名。
+          tag_for() { case "$1" in server) echo latest ;; *) echo "$1" ;; esac; }
+          for form in local tavern server; do
+            docker build -f deploy/api/Dockerfile \
+              --build-arg "FEATURES=--no-default-features --features ferrite-${form}" \
+              -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")" \
+              -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}" \
+              .
+            docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")"
+            docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}"
+          done
+          # admin-web 三形态共用同一个 SPA（deploy/web/Dockerfile 无形态参数），
+          # deploy/README.md「已知差异」已注明按形态裁剪待 issue #59。
+          docker build -f deploy/web/Dockerfile \
+            -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:latest" \
+            -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:${SPEC}" .
+          docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:latest"
+          docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:${SPEC}"
 
       - name: 两边同步发布 GitHub Release（私有主仓 + 公开壳仓）
         if: inputs.tag != '' && inputs.dry_run != 'true'
