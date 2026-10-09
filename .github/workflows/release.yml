@@ -1,8 +1,9 @@
 # ferrite 发布壳工作流：私有主仓（地址只在下方 PRIVATE_REPO env 出现）推 ferrite-v* tag（或手动派发），
 # 由主仓 ferrite-release.yml 派发触发（on 只有 workflow_dispatch，同 ci.yml 不变量）。
-# 检出凭据拉私有源码构建，产物直接发成主仓的 GitHub Release；
-# 公开壳仓不落 artifact —— 私有代码的编译产物不进公开仓。
-#   tag 非空 且 dry_run=false → 创建 Release（asset + notes 都写主仓）
+# 检出凭据拉私有源码构建，产物两边同步发布（维护者 2026-10-09 决策：二进制 + config 模板 +
+# 五组 notes 可公开）：私有主仓 + 本公开壳仓，同一 tag 同一份资产与 notes。
+# 源码仍不进壳仓：只在一次性 runner 检出，提交进本仓的只有 workflow YAML，Actions artifact 恒为 0。
+#   tag 非空 且 dry_run=false → 两侧 Release 同步（缺失则创建，已存在则 clobber 资产并对齐 notes）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
 #
 # 三形态三 asset（方案 A：一条版本线，一个 tag 挂三份产物；形态别名定义在私有仓
@@ -28,8 +29,10 @@ on:
         required: false
         default: 'false'
 
+# contents: write 仅为发布到本壳仓自身（github.token 只覆盖本仓）；主仓仍走 FERRITE_PAT。
+# token 不自动注入 env，仅下方发布步骤显式引用，构建步骤拿不到。
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -166,22 +169,37 @@ jobs:
           du -h dist/*.tar.gz
         id: pkg
 
-      - name: 发布 GitHub Release 到私有主仓
+      - name: 两边同步发布 GitHub Release（私有主仓 + 公开壳仓）
         if: inputs.tag != '' && inputs.dry_run != 'true'
         env:
-          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          FERRITE_PAT: ${{ secrets.FERRITE_PAT }}
+          SHELL_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # 资产名 = ferrite-<形态>-<版本段>-linux-x86_64.tar.gz（版本段 = tag 去 ferrite- 前缀）
           DIST="${{ steps.pkg.outputs.dist }}"
           SPEC="${DIST#ferrite-}"
-          gh release create "${{ inputs.tag }}" \
-            "dist/ferrite-local-${SPEC}-linux-x86_64.tar.gz" \
-            "dist/ferrite-tavern-${SPEC}-linux-x86_64.tar.gz" \
-            "dist/ferrite-server-${SPEC}-linux-x86_64.tar.gz" \
-            -R "${{ env.PRIVATE_REPO }}" \
-            --title "${{ steps.pkg.outputs.dist }}" \
-            --notes-file release-notes.md
+          ASSETS=(
+            "dist/ferrite-local-${SPEC}-linux-x86_64.tar.gz"
+            "dist/ferrite-tavern-${SPEC}-linux-x86_64.tar.gz"
+            "dist/ferrite-server-${SPEC}-linux-x86_64.tar.gz"
+          )
+          # 同一口径同步两侧：缺失则创建（资产 + 标题 + notes），已存在则 clobber 资产并对齐 notes。
+          # 主仓用 FERRITE_PAT（跨仓），壳仓用本 workflow 的 github.token（仅本仓写权）。
+          sync_release() {
+            local target="$1" token="$2"
+            if GH_TOKEN="$token" gh release view "${{ inputs.tag }}" -R "$target" >/dev/null 2>&1; then
+              GH_TOKEN="$token" gh release upload "${{ inputs.tag }}" "${ASSETS[@]}" -R "$target" --clobber
+              GH_TOKEN="$token" gh release edit "${{ inputs.tag }}" -R "$target" \
+                --title "$DIST" --notes-file release-notes.md
+            else
+              GH_TOKEN="$token" gh release create "${{ inputs.tag }}" "${ASSETS[@]}" -R "$target" \
+                --title "$DIST" --notes-file release-notes.md
+            fi
+            echo "synced release ${{ inputs.tag }} -> $target"
+          }
+          sync_release "${{ env.PRIVATE_REPO }}" "$FERRITE_PAT"
+          sync_release "hathawayANdRX105/ferrite-ci" "$SHELL_TOKEN"
 
       - name: dry run 收尾提示
         if: inputs.tag == '' || inputs.dry_run == 'true'
