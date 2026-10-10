@@ -28,7 +28,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ inputs.pr != '' && format('pr-{0}', inputs.pr) || 'main' }}
+  # main push 按 sha 分键：所有 main run 挤在 'main' 单组会被 cancel-in-progress 互相取消（制造 cancelled 假红）；PR 组 pr-N 语义不变，新 push 作废旧 run 是省分钟的刻意设计。
+  group: ci-${{ inputs.pr != '' && format('pr-{0}', inputs.pr) || format('main-{0}', inputs.sha) }}
   cancel-in-progress: true
 
 env:
@@ -273,7 +274,8 @@ jobs:
       - name: 回写 commit status
         env:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
-          STATE: "${{ needs.lint-check.result == 'success' && needs.test.result == 'success' && 'success' || 'failure' }}"
+          # cancelled ≠ failure：被并发组取消不代表代码有问题，回写 pending 表示等待重派/手动补派，不能折成红（GH commit status 接受 pending）。
+          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled') && 'pending') || 'failure' }}"
           DESC: "${{ format('ferrite-ci: lint {0}, test {1}', needs.lint-check.result, needs.test.result) }}"
           URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
