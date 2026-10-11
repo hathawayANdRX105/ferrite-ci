@@ -63,7 +63,22 @@ jobs:
         run: |
           set -euo pipefail
           timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang shellcheck
+
+      # canon 的 bash 规则 CD-06（主仓 .githooks/spec/code/code_bash.yaml，shellcheck --format=gcc）
+      # 在工具缺失的机器上按设计降级为 WARN 跳过，于是 bash 脚本可能长期没人检查
+      # （真实漏网：主仓 benches/scripts/bench_gateway.sh 少一个闭合引号，`bash -n` 都过不去）。
+      # 这里在 CI 里按同一口径补跑；主仓等价入口是 `just lint-shell`。
+      # 跳过符号链接——shellcheck 会顺链把同一个文件报两遍（benches/scripts/deploy_bench_key.sh 是软链）。
+      - name: shell 闸门（shellcheck，与 canon CD-06 同口径）
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh' 'bin/*' 'lib/*')
+          real=()
+          for f in "${files[@]}"; do
+            if [ -f "$f" ] && [ ! -L "$f" ]; then real+=("$f"); fi
+          done
+          shellcheck --format=gcc "${real[@]}"
 
       - name: 装 sccache
         uses: mozilla-actions/sccache-action@v0.0.9
