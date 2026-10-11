@@ -11,6 +11,10 @@ on:
       sha:
         description: '待测私有仓 commit SHA'
         required: true
+      status_sha:
+        description: '回写 shell-ci 状态的私有仓 commit SHA（空 = 用 sha；PR 派发传 PR 头提交，让 gh pr checks 看得到）'
+        required: false
+        default: ''
       pr:
         description: 'PR 编号（空 = main push / 手动触发）'
         required: false
@@ -264,7 +268,7 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
-  # 聚合两关卡结果，写 commit status `shell-ci` 回主仓 commit。
+  # 聚合两关卡结果，写 commit status `shell-ci` 回主仓：落点 = status_sha（空则回退 sha）。
   report:
     needs: [lint-check, test]
     if: always()
@@ -280,7 +284,8 @@ jobs:
           URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           set -euo pipefail
-          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/${{ inputs.sha }}" \
+          TARGET="${{ inputs.status_sha || inputs.sha }}"
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
             -f state="$STATE" -f context=shell-ci -f description="$DESC" -f target_url="$URL" \
             > /dev/null
-          echo "status $STATE posted to ${{ inputs.sha }}"
+          echo "status $STATE posted to $TARGET"
