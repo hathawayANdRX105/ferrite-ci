@@ -105,6 +105,33 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p ui-kit --tests
 
+      # wasm32 编译门禁：AGENTS.md 要求 crates/web 下必须支持 wasm32-unknown-unknown，
+      # 而本仓 CI 此前没有任何一步在编 wasm（唯一真编点是部署镜像）——规则等于无人把守。
+      # 判定与编译都在主仓的 scripts/wasm-check.sh 里：默认走文件级路径判定，因为本 job
+      # 不装 testless（装它要多花一次 cargo install，而那是 test job 的事）；显式设
+      # WASM_CHECK_DECIDER=files 而不是靠「testless 恰好没装」这种隐式契约。
+      # 命中 crates/web/**、apps/web/**、apps/kit-demo/**、crates/harness/{core,agent-prompts,tools}/
+      # 下的 .rs/.toml 才真编；无关改动秒级跳过；根 Cargo.toml/Cargo.lock 变动与拿不到
+      # diff 一律保守跑（与 test-fast 的降级纪律同源）。
+      - name: 取 base 分支（wasm 门禁判定用）
+        run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+
+      - name: 装 wasm32 目标
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: wasm32 编译门禁
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            base="origin/${{ inputs.base }}"
+            echo ">>> PR 派发：判定 base = ${base}（merge-base 比较）"
+          else
+            base="HEAD~1"
+            echo ">>> main push / 手动派发：判定 base = HEAD~1"
+          fi
+          WASM_CHECK_DECIDER=files bash scripts/wasm-check.sh "$base"
+
       # 迁移布局守卫（无 PG 可跑）：版本前缀重复 / 正文混入 git log 行。
       # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
       # 从快关漏过、把 main 弄红，这里无条件跑死。
