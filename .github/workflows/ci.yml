@@ -178,7 +178,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: postgres:18-alpine
+        image: timescale/timescaledb:latest-pg18
         env:
           POSTGRES_USER: ferrite
           POSTGRES_PASSWORD: ferrite
@@ -189,7 +189,7 @@ jobs:
           --health-cmd "pg_isready -U ferrite -d ferrite"
           --health-interval 5s
           --health-timeout 3s
-          --health-retries 10
+          --health-retries 20
     env:
       DATABASE_URL: postgres://ferrite:ferrite@localhost:5432/ferrite
       FERRITE_E2E_DATABASE_URL: postgres://ferrite:ferrite@localhost:5432/ferrite
