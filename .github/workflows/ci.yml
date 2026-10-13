@@ -178,7 +178,9 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: timescale/timescaledb:latest-pg18
+        # 钉版本（与 deploy/compose.yml 同口径）：TimescaleDB 正把压缩 API
+        # 迁到 columnstore 命名，漂移会改迁移 0026 里策略守卫的匹配面。
+        image: timescale/timescaledb:2.28.3-pg18
         env:
           POSTGRES_USER: ferrite
           POSTGRES_PASSWORD: ferrite
