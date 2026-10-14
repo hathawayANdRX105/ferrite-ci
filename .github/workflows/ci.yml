@@ -1,6 +1,7 @@
 # ferrite 公开壳仓 CI：源码在私有主仓（地址只在下方 PRIVATE_REPO env 出现），由主仓 ci-dispatch 触发。
 # lint 与 test 并行；test 关卡启动 PostgreSQL，数据库测试真实执行。
-# PR（pr 入参非空）走 testless 快关，main/手动 full=true 走全量。
+# PR（pr 入参非空）走 testless 快关，main/手动 full=true 走全量；主仓在 PR ready_for_review 时也会派发一次 full=true（合并前全量）。
+# 回写的 shell-ci 状态描述在全量 run 带 "(full)" 标记（见 report job DESC），供合并门辨认最近一次是否全量。
 # 缓存与用法详见 .github/README.md。
 
 name: ci
@@ -328,7 +329,7 @@ jobs:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
           # cancelled ≠ failure：被并发组取消不代表代码有问题，回写 pending 表示等待重派/手动补派，不能折成红（GH commit status 接受 pending）。
           STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled') && 'pending') || 'failure' }}"
-          DESC: "${{ format('ferrite-ci: lint {0}, test {1}', needs.lint-check.result, needs.test.result) }}"
+          DESC: "${{ format('ferrite-ci{0}: lint {1}, test {2}', inputs.full == 'true' && ' (full)' || '', needs.lint-check.result, needs.test.result) }}"
           URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           set -euo pipefail
