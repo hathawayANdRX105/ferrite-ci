@@ -107,9 +107,16 @@ jobs:
 
       # ui-components 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
       # const（TOKEN_GROUPS）与 asset CSS 的 diff，快关会漏选 theme/style 契约。
-      - name: ui-components 契约测试
+      # 包名自适应：主仓 main 与在途分支可能分别处于 ui-kit / ui-components 两个
+      # 世代（改名随前端分层重构迁移），硬编码任一名字都会把另一侧的 PR 快关
+      # 卡死在 "package did not match any packages"。问 cargo metadata 要真身。
+      - name: ui-kit/ui-components 契约测试
         timeout-minutes: 15
-        run: cargo test -p ui-components --tests
+        run: |
+          set -euo pipefail
+          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name' | grep -xE 'ui-kit|ui-components' | head -1)
+          echo "kit contract gate: package = $PKG"
+          cargo test -p "$PKG" --tests
 
       # wasm32 编译门禁：AGENTS.md 要求 crates/web 下必须支持 wasm32-unknown-unknown，
       # 而本仓 CI 此前没有任何一步在编 wasm（唯一真编点是部署镜像）——规则等于无人把守。
