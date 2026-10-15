@@ -151,7 +151,13 @@ jobs:
             base="HEAD~1"
             echo ">>> main push / 手动派发：判定 base = HEAD~1"
           fi
-          WASM_CHECK_DECIDER=files bash scripts/wasm-check.sh "$base"
+          # stacked 分支可能没有这个脚本（改动面不含 wasm 域）——缺文件按「无 wasm 变更」跳过，
+          # 不让 lint-check 整体 exit 127（spec-problem 05）。
+          if [ -f scripts/wasm-check.sh ]; then
+            WASM_CHECK_DECIDER=files bash scripts/wasm-check.sh "$base"
+          else
+            echo "scripts/wasm-check.sh not present on this branch; skipping wasm gate"
+          fi
 
       # 迁移布局守卫（无 PG 可跑）：版本前缀重复 / 正文混入 git log 行。
       # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
@@ -349,6 +355,12 @@ jobs:
         run: |
           set -euo pipefail
           TARGET="${{ inputs.status_sha || inputs.sha }}"
+          # SHA 已不存在（分支 force-push/删除，spec-problem 04 的竞态面）时
+          # GitHub 返回 422——这不是代码问题，跳过回写而不是把 report 打红。
+          if ! gh api "repos/${{ env.PRIVATE_REPO }}/commits/$TARGET" > /dev/null 2>&1; then
+            echo "target sha $TARGET no longer exists; skipping status write"
+            exit 0
+          fi
           gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
             -f state="$STATE" -f context=shell-ci -f description="$DESC" -f target_url="$URL" \
             > /dev/null
