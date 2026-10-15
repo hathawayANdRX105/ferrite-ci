@@ -110,11 +110,19 @@ jobs:
       # 包名自适应：主仓 main 与在途分支可能分别处于 ui-kit / ui-components 两个
       # 世代（改名随前端分层重构迁移），硬编码任一名字都会把另一侧的 PR 快关
       # 卡死在 "package did not match any packages"。问 cargo metadata 要真身。
+      # 两个世代都不在树上（前端分层重构未合入的过渡树）时必须显式跳过：
+      # grep 无命中在 set -euo pipefail 下同样会把整步带红，exit 0 才是真跳过。
+      # mono main 合入 #249 后本 step 自动恢复执行。
       - name: ui-kit/ui-components 契约测试
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name' | grep -xE 'ui-kit|ui-components' | head -1)
+          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '[.packages[].name] | map(select(. == "ui-kit" or . == "ui-components")) | first // empty')
+          if [ -z "$PKG" ]; then
+            echo ">>> 树上没有 ui-kit / ui-components（前端分层重构尚未合入 main）；"
+            echo ">>> kit 契约测试按包缺席跳过，#249 合入后本 step 自动恢复执行。"
+            exit 0
+          fi
           echo "kit contract gate: package = $PKG"
           cargo test -p "$PKG" --tests
 
