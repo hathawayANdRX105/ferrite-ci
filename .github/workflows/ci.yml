@@ -99,11 +99,15 @@ jobs:
 
       # 样式类守卫（check-style-classes.mjs）+ 双入口 CSS 构建在 CI 硬拦：
       # 未登记页面类 / kit 配方漂移在这里红，不等浏览器冒烟。
+      # Bin-layer compat: web entry points move from apps/ to bin/ in mono W5;
+      # resolve either generation so both trees pass this step.
       - name: web 样式守卫 + CSS 构建
         run: |
           set -euo pipefail
-          (cd apps/web && bun install --frozen-lockfile && bun run css)
-          (cd apps/kit-demo && bun install --frozen-lockfile && bun run css)
+          web_dir=$([ -d bin/web ] && echo bin/web || echo apps/web)
+          kit_dir=$([ -d bin/kit-demo ] && echo bin/kit-demo || echo apps/kit-demo)
+          (cd "$web_dir" && bun install --frozen-lockfile && bun run css)
+          (cd "$kit_dir" && bun install --frozen-lockfile && bun run css)
 
       # ui-components 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
       # const（TOKEN_GROUPS）与 asset CSS 的 diff，快关会漏选 theme/style 契约。
@@ -207,7 +211,8 @@ jobs:
       - name: shell 闸门（shellcheck，与 canon CD-06 同口径）
         run: |
           set -euo pipefail
-          mapfile -t files < <(git ls-files '*.sh' 'bin/*' 'lib/*')
+          # bin/ is a Rust tree in the W5 generation; keep shell files only.
+          mapfile -t files < <(git ls-files '*.sh' 'bin/*.sh' 'lib/*.sh')
           real=()
           for f in "${files[@]}"; do
             if [ -f "$f" ] && [ ! -L "$f" ]; then real+=("$f"); fi
