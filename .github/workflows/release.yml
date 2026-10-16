@@ -6,12 +6,15 @@
 #   tag 非空 且 dry_run=false → 两侧 Release 同步（缺失则创建，已存在则 clobber 资产并对齐 notes）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
 #
-# 三形态三 asset（方案 A：一条版本线，一个 tag 挂三份产物；形态别名定义在私有仓
-# apps/api/Cargo.toml，本 workflow 只消费）：
-#   ferrite-local   --no-default-features --features ferrite-local   （个人 relay，无 billing/mcp）
-#   ferrite-tavern  --no-default-features --features ferrite-tavern  （用户酒馆，仅 tavern）
-#   ferrite-server  --no-default-features --features ferrite-server  （服务器，tavern+billing+mcp）
-# 三形态共用同一 tag、同一份 release notes，notes 不按形态分裂。
+# 形态 asset（方案 A：一条版本线，一个 tag 挂每个形态一份产物；形态别名定义在
+# 私有仓 apps/api/Cargo.toml，本 workflow 只消费并随形态世代自适应）：
+#   三形态世代（ferrite-{local,tavern,server} 别名存在时）：
+#     ferrite-local   --no-default-features --features ferrite-local   （个人 relay，无 billing/mcp）
+#     ferrite-tavern  --no-default-features --features ferrite-tavern  （用户酒馆，仅 tavern）
+#     ferrite-server  --no-default-features --features ferrite-server  （服务器，tavern+billing+mcp）
+#   单形态世代（别名收敛后）：只出 ferrite-server，default 特性构建（= 原 server
+#   形态；tavern 删除后 default 即完整产品），docker tag 契约不变（server = :latest）。
+# 各形态共用同一 tag、同一份 release notes，notes 不按形态分裂。
 name: release
 
 on:
@@ -45,8 +48,9 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # LTO fat + codegen-units=1 冷启构建需要余量；三形态是三次独立 release 构建
-    # （feature 图不同、无法复用产物），其中 local/tavern 两条 sccache 轨冷启，留 90。
+    # LTO fat + codegen-units=1 冷启构建需要余量；三形态世代是三次独立 release
+    # 构建（feature 图不同、无法复用产物），其中 local/tavern 两条 sccache 轨冷启，
+    # 留 90；单形态世代只需一次构建，余量富余。
     timeout-minutes: 90
     steps:
       - name: 检出私有源码（PAT）
@@ -94,13 +98,32 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
 
-      - name: 编译三形态二进制
+      - name: 探测形态（随 apps/api 的别名世代自适应）
+        id: shapes
         run: |
           set -euo pipefail
-          # 三形态 feature 图不同 → 各自独立 cargo build，且 --target-dir 必须隔离
-          # （共用 target 会让三次 build 覆盖同一个 target/release/ferrite）。
-          # --no-default-features 每条都不能省：省掉它 default（= ferrite-server）
-          # 仍生效，三条会全变成 server 形态。
+          # 形态清单落在 shapes.txt：每行 <形态名>|<cargo feature 参数>（可为空）。
+          # 三形态世代（ferrite-local 别名存在）：三条各自 --no-default-features，
+          # 每条都不能省——省掉它 default 仍生效，三条会全变成同一形态；单形态
+          # 世代（tavern 删除后别名收敛）：只出 server 一条，default 特性即完整产品。
+          # 判定问 cargo metadata 要真身（同 ci.yml 的世代自适应风格）。
+          if cargo metadata --format-version 1 --no-deps \
+            | jq -e '.packages[] | select(.name == "api") | .features | has("ferrite-local")' > /dev/null; then
+            printf '%s\n' \
+              'local|--no-default-features --features ferrite-local' \
+              'tavern|--no-default-features --features ferrite-tavern' \
+              'server|--no-default-features --features ferrite-server' > shapes.txt
+          else
+            printf '%s\n' 'server|' > shapes.txt
+          fi
+          echo '>>> 形态清单（<形态名>|<feature 参数>）：'
+          cat shapes.txt
+
+      - name: 编译形态二进制
+        run: |
+          set -euo pipefail
+          # 各形态 feature 图不同 → 各自独立 cargo build，且 --target-dir 必须隔离
+          # （共用 target 会让多次 build 覆盖同一个 target/release/ferrite）。
           build_one() {
             local name="$1"; shift
             echo ">>> cargo build ferrite-${name}: $*"
@@ -108,9 +131,12 @@ jobs:
             cp "target/rel-${name}/release/ferrite" "out-bin/ferrite-${name}"
           }
           mkdir -p out-bin
-          build_one local   --no-default-features --features ferrite-local
-          build_one tavern  --no-default-features --features ferrite-tavern
-          build_one server  --no-default-features --features ferrite-server
+          # $features 故意不加引号：可能含多个参数（--no-default-features --features X）；
+          # 单形态世代为空串时展开为零个参数（走 default 构建）。
+          while IFS='|' read -r name features; do
+            [ -n "$name" ] || continue
+            build_one "$name" $features
+          done < shapes.txt
           ls -l out-bin
 
       - name: 打包
@@ -118,7 +144,7 @@ jobs:
           set -euo pipefail
           TAG="${{ inputs.tag }}"
           if [[ -n "$TAG" ]]; then
-            # tag: ferrite-v<M.R.P>-g<hash>；三形态统一版本线（见 version-stats skill）
+            # tag: ferrite-v<M.R.P>-g<hash>；各形态统一版本线（见 version-stats skill）
             SPEC="${TAG#ferrite-v}"               # M.R.P-g<hash>
             VER="${SPEC%%-g*}"                    # M.R.P
             DIST="ferrite-v${VER}-g${SPEC#*-g}"   # = TAG
@@ -154,7 +180,7 @@ jobs:
             section "Fixed"            '^(fix|perf)(\([^)]*\))?:'
             section "Removed"          '^revert(\([^)]*\))?:'
           } > release-notes.md
-          # 三份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
+          # 每形态一份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
           # 安全配置示例（占位符/注释字段；compose 专用的 deploy/config/config.toml
           # 含 compose 服务名/口令，不打包）+ prompt 语料。
           # 语料必须是运行时资产：渠道探活（channel_test）从
@@ -163,7 +189,8 @@ jobs:
           # 漏打它 → 裸机部署解压即用、但探活报「no prompt template available」。
           # config.toml.example 文案已说明默认读 ./config/prompt-templates.jsonl。
           mkdir -p dist
-          for form in local tavern server; do
+          while IFS='|' read -r form _; do
+            [ -n "$form" ] || continue
             ADIST="ferrite-${form}-${DIST#ferrite-}"
             mkdir -p "dist/${ADIST}/config"
             cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
@@ -171,7 +198,7 @@ jobs:
             cp deploy/config/config.toml.example "dist/${ADIST}/config/config.toml.example"
             tar -czf "dist/${ADIST}-linux-x86_64.tar.gz" -C dist "${ADIST}"
             rm -rf "dist/${ADIST}"
-          done
+          done < shapes.txt
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "dist=${DIST}" >> "$GITHUB_OUTPUT"
           # 只输出哈希与体积（不 echo 源码/二进制内容）
@@ -209,17 +236,20 @@ jobs:
         run: |
           set -euo pipefail
           SPEC="${TAG#ferrite-v}"
-          # compose 的 tag 契约：server → :latest，其余用形态名。
+          # compose 的 tag 契约：server → :latest，其余用形态名；单形态世代清单
+          # 只有 server → 只推 :latest，deploy/compose.yml 的 image 契约不变。
           tag_for() { case "$1" in server) echo latest ;; *) echo "$1" ;; esac; }
-          for form in local tavern server; do
+          # FEATURES 传形态的 cargo 参数（可为空 = default 构建，见 deploy/api/Dockerfile）。
+          while IFS='|' read -r form features; do
+            [ -n "$form" ] || continue
             docker build -f deploy/api/Dockerfile \
-              --build-arg "FEATURES=--no-default-features --features ferrite-${form}" \
+              --build-arg "FEATURES=${features}" \
               -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")" \
               -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}" \
               .
             docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")"
             docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}"
-          done
+          done < shapes.txt
           # admin-web 三形态共用同一个 SPA（deploy/web/Dockerfile 无形态参数），
           # deploy/README.md「已知差异」已注明按形态裁剪待 issue #59。
           docker build -f deploy/web/Dockerfile \
@@ -238,11 +268,11 @@ jobs:
           # 资产名 = ferrite-<形态>-<版本段>-linux-x86_64.tar.gz（版本段 = tag 去 ferrite- 前缀）
           DIST="${{ steps.pkg.outputs.dist }}"
           SPEC="${DIST#ferrite-}"
-          ASSETS=(
-            "dist/ferrite-local-${SPEC}-linux-x86_64.tar.gz"
-            "dist/ferrite-tavern-${SPEC}-linux-x86_64.tar.gz"
-            "dist/ferrite-server-${SPEC}-linux-x86_64.tar.gz"
-          )
+          ASSETS=()
+          while IFS='|' read -r form _; do
+            [ -n "$form" ] || continue
+            ASSETS+=("dist/ferrite-${form}-${SPEC}-linux-x86_64.tar.gz")
+          done < shapes.txt
           # 同一口径同步两侧：缺失则创建（资产 + 标题 + notes），已存在则 clobber 资产并对齐 notes。
           # 主仓用 FERRITE_PAT（跨仓），壳仓用本 workflow 的 github.token（仅本仓写权）。
           sync_release() {

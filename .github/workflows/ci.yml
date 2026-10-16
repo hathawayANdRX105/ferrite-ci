@@ -166,19 +166,30 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p db --test migrations_layout
 
-      # 形态别名回归网：apps/api 的 ferrite-{local,tavern,server} 三别名各 check 一次。
-      # default（= ferrite-server）已被上面的 clippy --all-targets 覆盖，但
-      # --no-default-features 的三条没有任何测试会编译，别名被改坏（如误把
-      # tavern 塞进 ferrite-local）只有这里能红——cargo 的 feature 统一（#10266）
-      # 也让它们绝不能进共享 crate。
-      - name: 形态别名检查（ferrite-local / ferrite-tavern / ferrite-server）
+      # 形态回归网：apps/api 的形态面。形态别名（ferrite-*）存在时逐个 check
+      # --no-default-features --features <别名>——default（三形态世代 = ferrite-server）
+      # 已被上面的 clippy --all-targets 覆盖，但这些非默认配置没有任何测试会编译，
+      # 别名被改坏（如误把 tavern 塞进 ferrite-local）只有这里能红——cargo 的
+      # feature 统一（#10266）也让它们绝不能进共享 crate。别名收敛成单形态
+      # （tavern 删除后）时改查另外两种配置：default 与 --no-default-features。
+      # 判定问 cargo metadata 要真身（同 ui-kit step 的世代自适应风格）。
+      - name: 形态检查（随 apps/api 的别名世代自适应）
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          for form in local tavern server; do
-            echo ">>> cargo check -p api --no-default-features --features ferrite-${form}"
-            cargo check -p api --no-default-features --features "ferrite-${form}"
-          done
+          ALIASES=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '[.packages[] | select(.name == "api") | .features | keys[] | select(startswith("ferrite-"))] | sort | .[]')
+          if [ -z "$ALIASES" ]; then
+            echo ">>> 无形态别名（单形态世代）：check default 与 --no-default-features"
+            cargo check -p api
+            cargo check -p api --no-default-features
+          else
+            echo ">>> 形态别名：$(echo "$ALIASES" | tr '\n' ' ')"
+            while read -r feature; do
+              echo ">>> cargo check -p api --no-default-features --features ${feature}"
+              cargo check -p api --no-default-features --features "$feature"
+            done <<< "$ALIASES"
+          fi
 
       - name: cargo fmt
         run: cargo fmt --all --check
