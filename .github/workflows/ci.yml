@@ -247,6 +247,112 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
+  # 端上壳编译守卫：apps/{desktop,mobile} 各自独立 workspace，根 Cargo.toml 的 members
+  # 不含它们，clippy --all-targets / just test 都编不到——而两个壳都在**编译期**调
+  # tauri::generate_context!()（读 tauri.conf.json：bundle.icon 缺 RGBA PNG 直接 panic，
+  # 上游 tauri-v2.12.4 context.rs:215-224/479-493 + image.rs:79-85）。实测缺口见 #342：
+  # 桌面壳 bundle.icon 留空 + icons/ 只有 README，本机 cargo check 一编即 panic，
+  # 而 CI 无任何一步编它（apps/* 不在主 workspace 的依赖图里）。
+  # 本 job 只做 cargo check，不装 Android 工具链：移动壳的 Android 出包由 release.yml
+  # 的 android job 承担（dry-run 可验），这里补的是「改配置/图标就红」的编译级回归网。
+  # mold + clang + sccache 不可省：apps/*/src-tauri 向上搜索会命中仓根 .cargo/config.toml
+  # （linker=clang、ld-path=mold、rustc-wrapper=sccache），缺任一个都编译不过（spike 实测定论）。
+  app-shell-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
+      # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
+      - name: 装 tauri Linux 依赖
+        run: |
+          set -euo pipefail
+          timeout 300 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
+      - name: 装 mold + clang
+        run: |
+          set -euo pipefail
+          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
+      # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
+      - name: Cache 依赖（restore-only，写回归写入方 run）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（app-shell 角色，restore-only）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-appshell-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-appshell-${{ runner.os }}-v0.10.0-
+            sccache-lint-${{ runner.os }}-v0.10.0-
+            sccache-test-${{ runner.os }}-v0.10.0-
+
+      - name: 取 base 分支（壳编译判定用）
+        if: inputs.pr != ''
+        run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+
+      - name: 端上壳 cargo check（diff 门禁）
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            base="origin/${{ inputs.base }}"
+            git rev-parse --verify -q "$base" >/dev/null || base=""   # 拿不到 base 时保守全量
+          else
+            base="HEAD~1"
+          fi
+          if [ -n "$base" ]; then
+            echo ">>> 判定 merge-base 范围: ${base}...HEAD（仅 apps/**）"
+            files="$(git diff --name-only "${base}"...HEAD -- apps || true)"
+          else
+            echo ">>> 拿不到 base（分支被删 / force-push），保守全量跑"
+            files="apps"
+          fi
+          if [ -z "$files" ]; then
+            echo "::notice::apps/** 无变更，端上壳编译跳过"
+            exit 0
+          fi
+          printf '%s\n' "$files" | sed 's/^/  apps 变更: /'
+          for shell in desktop mobile; do
+            dir="apps/${shell}/src-tauri"
+            if [ ! -d "$dir" ]; then
+              echo ">>> ${dir} 不存在（壳布局变动），跳过 ${shell}"
+              continue
+            fi
+            echo ">>> cargo check ${shell}（${dir}）"
+            (cd "$dir" && cargo check)
+          done
+          echo ">>> 端上壳编译守卫通过"
+
   # 测试连接临时 PostgreSQL；db_bootstrap 在测试启动时应用迁移。
   test:
     runs-on: ubuntu-latest
@@ -366,7 +472,7 @@ jobs:
 
   # 聚合两关卡结果，写 commit status `shell-ci` 回主仓：落点 = status_sha（空则回退 sha）。
   report:
-    needs: [lint-check, test]
+    needs: [lint-check, test, app-shell-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -375,8 +481,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
           # cancelled ≠ failure：被并发组取消不代表代码有问题，回写 pending 表示等待重派/手动补派，不能折成红（GH commit status 接受 pending）。
-          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled') && 'pending') || 'failure' }}"
-          DESC: "${{ format('ferrite-ci{0}: lint {1}, test {2}', inputs.full == 'true' && ' (full)' || '', needs.lint-check.result, needs.test.result) }}"
+          # app-shell-check 无 job 级 if（跳过在 step 内做 notice exit 0），不会被 skipped；
+          # cancelled 与另两关同口径折成 pending，让重派后能重新回写。
+          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
+          DESC: "${{ format('ferrite-ci{0}: lint {1}, test {2}, app-shell {3}', inputs.full == 'true' && ' (full)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result) }}"
           URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           set -euo pipefail
