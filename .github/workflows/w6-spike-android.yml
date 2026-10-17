@@ -3,7 +3,7 @@
 # Android debug APK（aarch64）——产物不入库、不上传 artifact，绿 run 日志里的
 # 「W6-SPIKE-APK path=… size=… sha256=…」行即凭证（公开仓不存私有代码产物）。
 # 触发仅 workflow_dispatch（保持壳仓「on: 只有 workflow_dispatch」不变量）；无 cache 步骤。
-# 一次性 spike：正式移动发布链属 W6 主线，另做；run 到绿后由维护者决定本文件删留。
+# 一次性 spike：正式移动发布链属 W6 主线，另做；完成后删除（删除动作经维护者确认后执行）。
 
 name: w6-spike-android
 
