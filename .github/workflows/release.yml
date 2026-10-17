@@ -24,7 +24,10 @@
 #
 # 版本快照（2026-10-17 壳仓实测，spike run 39013969883 / 39014614301；三处浮点已锁）：
 #   apps/desktop|mobile/package.json  @tauri-apps/cli = 2.12.3（exact，原 ^2.11.5）
-#   apps/*/src-tauri/Cargo.toml      tauri / tauri-build = 2.12.4（exact，原 "2" caret）
+#   apps/*/src-tauri/Cargo.toml      tauri = 2.12.4 / tauri-build = 2.7.3（两条版本线，
+#                                   均为 exact；原均为 "2" caret）——取值来自壳仓绿 run
+#                                   39013969883 的实编译日志（tauri v2.12.4 + tauri-build v2.7.3）；
+#                                   写同一个号会在依赖解析期直接失败（ferrite #345 撞过）
 #   tauri-cli 2.12.3 生成的 Android 模板栈（随 CLI 换代，升级须同步此快照）：
 #     Gradle 9.6.1 / AGP 9.3.1 / Kotlin 2.2.10 / compileSdk 37 /
 #     runner 预装 NDK 29.0.14206865（本 job 显式选版本） / JDK 17（AGP 9.x 最低）
