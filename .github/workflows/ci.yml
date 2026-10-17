@@ -135,7 +135,7 @@ jobs:
       # 判定与编译都在主仓的 scripts/wasm-check.sh 里：默认走文件级路径判定，因为本 job
       # 不装 testless（装它要多花一次 cargo install，而那是 test job 的事）；显式设
       # WASM_CHECK_DECIDER=files 而不是靠「testless 恰好没装」这种隐式契约。
-      # 命中 crates/ui/**、apps/web/**、apps/kit-demo/**、crates/harness/{core,agent-prompts,tools}/
+      # 命中 crates/ui/**、bin/web/**、bin/kit-demo/**、crates/harness/agent-prompts/
       # 下的 .rs/.toml 才真编；无关改动秒级跳过；根 Cargo.toml/Cargo.lock 变动与拿不到
       # diff 一律保守跑（与 test-fast 的降级纪律同源）。
       - name: 取 base 分支（wasm 门禁判定用）
@@ -220,6 +220,16 @@ jobs:
           # --severity=style：canon CD-06 不传 severity（默认 style = 四级全开），这里写死防以后默认变化；
           # 与主仓 `just lint-shell` 同参数。注意本机退回 `bun x shellcheck` 时不出 note 级，两边不完全等价。
           shellcheck --severity=style --format=gcc "${real[@]}"
+
+      # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 agent-prompts 的
+      # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册（testless 的 seed 只来自 Rust 文件，
+      # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main，故这里无条件跑死）。
+      # 位置与上面的 shell 闸门同理放在 fmt/clippy 之后：步骤一红，后面的步骤全被 skipped。
+      # 它是本 job 首次 codegen + 链接 agent-prompts 的 dev-dep tools（ast-grep + tree-sitter
+      # C 语法 + host 侧 db/turso），构建量级高于 db 守卫，故给 15 分钟（同 ui-kit 契约测试）。
+      - name: 规范文档工具名守卫
+        timeout-minutes: 15
+        run: cargo test -p agent-prompts --test tool_selection_tests
 
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
