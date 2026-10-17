@@ -16,11 +16,20 @@
 #   形态；tavern 删除后 default 即完整产品），docker tag 契约不变（server = :latest）。
 # 各形态共用同一 tag、同一 release notes，notes 不按形态分裂。
 # 移动壳（apps/mobile）恒随同一 tag 出一份 Android debug APK：
-#   ferrite-mobile-<版本段>.apk（universal、未 strip、体积大属预期）。
+#   ferrite-mobile-<版本段>.apk（universal、未 strip，体积大属预期）。
 #   用 debug 签名（免 keystore）——正式签名与产物分发口径由维护者另行裁决；
-#   命令序列取自 W6 spike 的实测配方（见 todo/w6-spike/README.md §C/§F 同口径），
+#   命令序列取自 W6 spike 的实测配方（todo/w6-spike/README.md §C/§F 同口径），
 #   与形态二进制同一 job：不做 artifact 传递（保持「Actions artifact 恒为 0」），
 #   构建失败即整条发布失败（原子性：要么全发要么不发）。
+#
+# 版本快照（2026-10-17 壳仓实测，spike run 39013969883 / 39014614301；三处浮点已锁）：
+#   apps/desktop|mobile/package.json  @tauri-apps/cli = 2.12.3（exact，原 ^2.11.5）
+#   apps/*/src-tauri/Cargo.toml      tauri / tauri-build = 2.12.4（exact，原 "2" caret）
+#   tauri-cli 2.12.3 生成的 Android 模板栈（随 CLI 换代，升级须同步此快照）：
+#     Gradle 9.6.1 / AGP 9.3.1 / Kotlin 2.2.10 / compileSdk 37 /
+#     runner 预装 NDK 29.0.14206865（本 job 显式选版本） / JDK 17（AGP 9.x 最低）
+#   注意：第一阶段 §2 记的 2.11.5 时代模板数据（Gradle 8.14.3 / AGP 8.11.0 /
+#   Kotlin 1.9.25 / SDK 36）已过时——那份快照来自旧 CLI 模板常量，勿照抄。
 name: release
 
 on:
