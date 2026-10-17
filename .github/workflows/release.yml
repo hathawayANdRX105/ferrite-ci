@@ -14,7 +14,13 @@
 #     ferrite-server  --no-default-features --features ferrite-server  （服务器，tavern+billing+mcp）
 #   单形态世代（别名收敛后）：只出 ferrite-server，default 特性构建（= 原 server
 #   形态；tavern 删除后 default 即完整产品），docker tag 契约不变（server = :latest）。
-# 各形态共用同一 tag、同一份 release notes，notes 不按形态分裂。
+# 各形态共用同一 tag、同一 release notes，notes 不按形态分裂。
+# 移动壳（apps/mobile）恒随同一 tag 出一份 Android debug APK：
+#   ferrite-mobile-<版本段>.apk（universal、未 strip、体积大属预期）。
+#   用 debug 签名（免 keystore）——正式签名与产物分发口径由维护者另行裁决；
+#   命令序列取自 W6 spike 的实测配方（见 todo/w6-spike/README.md §C/§F 同口径），
+#   与形态二进制同一 job：不做 artifact 传递（保持「Actions artifact 恒为 0」），
+#   构建失败即整条发布失败（原子性：要么全发要么不发）。
 name: release
 
 on:
@@ -31,6 +37,10 @@ on:
         description: 'true = 只编译打包，不创建 Release'
         required: false
         default: 'false'
+      mobile:
+        description: 'true = 附带构建 Android debug APK；false = 只发形态二进制'
+        required: false
+        default: 'true'
 
 # contents: write 仅为发布到本壳仓自身（github.token 只覆盖本仓）；主仓仍走 FERRITE_PAT。
 # token 不自动注入 env，仅下方发布步骤显式引用，构建步骤拿不到。
@@ -206,6 +216,57 @@ jobs:
           du -h dist/*.tar.gz
         id: pkg
 
+      # ---- Android debug APK（apps/mobile；命令序列 = W6 spike 实测配方）----
+      - name: 装 Java 17（Android 构建链）
+        if: inputs.mobile == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 装 Bun（移动壳的 tauri-cli 入口）
+        if: inputs.mobile == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Android 工具链（SDK / NDK 三变量 / aarch64 target）
+        if: inputs.mobile == 'true'
+        run: |
+          set -euo pipefail
+          # runner 预装 Android SDK；NDK 取版本号最大的一个（spike 实测路径形态）。
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          test -d "$SDK" || { echo "Android SDK 不在 $SDK"; exit 1; }
+          NDK="$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1)"
+          test -n "$NDK" || { echo "NDK 缺失（$SDK/ndk/*）"; exit 1; }
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+            echo "NDK_HOME=$NDK"
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "ANDROID_NDK_ROOT=$NDK"
+          } >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android
+          # 证据：选定 NDK 的版本串（spike 报告 §F 同口径）
+          grep -E '^Pkg\.Revision' "$NDK/source.properties"
+
+      - name: 构建 Android debug APK
+        if: inputs.mobile == 'true'
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          SPEC="${{ steps.pkg.outputs.dist }}"
+          SPEC="${SPEC#ferrite-}"
+          bun install
+          bunx tauri android init --ci
+          bunx tauri android build --debug --apk --target aarch64
+          APK="src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
+          test -f "$APK" || { echo "APK 未产出：$APK"; exit 1; }
+          cp "$APK" "../../dist/ferrite-mobile-${SPEC}.apk"
+          # 证据行：路径 + 体积 + sha256（不 echo 产物内容）
+          sha256sum "../../dist/ferrite-mobile-${SPEC}.apk"
+          du -h "../../dist/ferrite-mobile-${SPEC}.apk"
+
       # ---- 容器镜像（GHCR）----
       # deploy/ 的两个 Dockerfile 早已按形态构建（deploy/api/Dockerfile 的
       # FEATURES build-arg、deploy/web/Dockerfile 的 dx build），此处只是把它们
@@ -273,6 +334,10 @@ jobs:
             [ -n "$form" ] || continue
             ASSETS+=("dist/ferrite-${form}-${SPEC}-linux-x86_64.tar.gz")
           done < shapes.txt
+          if [[ "${{ inputs.mobile }}" == "true" ]]; then
+            test -f "dist/ferrite-mobile-${SPEC}.apk" || { echo "缺少移动资产 dist/ferrite-mobile-${SPEC}.apk"; exit 1; }
+            ASSETS+=("dist/ferrite-mobile-${SPEC}.apk")
+          fi
           # 同一口径同步两侧：缺失则创建（资产 + 标题 + notes），已存在则 clobber 资产并对齐 notes。
           # 主仓用 FERRITE_PAT（跨仓），壳仓用本 workflow 的 github.token（仅本仓写权）。
           sync_release() {
