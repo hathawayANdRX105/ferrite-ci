@@ -68,18 +68,31 @@ jobs:
           # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
           # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
           # 和缓存回填一起放弃，故一律按 full。
+          #
+          # 另出一个 `xtask` 开关：xtask 是**独立 workspace**，`just test`（根 workspace 的
+          # cargo test --all）不覆盖它，于是 xtask/check/tests/ 下的 probe 在 CI 里从没跑过
+          # （实测全量 run 39155097666 日志里 xtask 零命中，我新加的 pages_own_ui_probe 与
+          # 既有的 dep_edge_bin_layer 都被漏掉）。只有本轮 diff 真碰 `xtask/` 才单跑它的测试：
+          # 无脑跑会让每个非 docs-only 的 PR 白付一次 check-* 的编译（分钟级，且大多数 PR 用不上）。
           if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
             echo ">>> 全量 run（main push / full=true）：不走快通道"
             echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "xtask=true" >> "$GITHUB_OUTPUT"   # 全量是安全网，xtask 也跑
             exit 0
           fi
           git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
           base="origin/${{ inputs.base }}"
+          if git diff --name-only "$base"...HEAD 2>/dev/null | grep -q '^xtask/'; then
+            echo "xtask=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "xtask=false" >> "$GITHUB_OUTPUT"
+          fi
           # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
           # 缺失不是代码问题，按 full 跑，别把三关打红。
           if [ ! -f scripts/ci-scope.sh ]; then
             echo ">>> scripts/ci-scope.sh 尚未就位（私有仓未合入），按 full 处理"
             echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "xtask=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           mode="$(bash scripts/ci-scope.sh "$base")"
@@ -237,6 +250,17 @@ jobs:
       - name: cargo clippy（全量关卡）
         if: steps.scope.outputs.mode != 'docs-only'
         run: cargo clippy --all-targets -- -D warnings
+
+      # xtask 是独立 workspace（自己的 Cargo.toml / Cargo.lock / target），而全量配方
+      # `just test` = `cargo test --all` 只覆盖根 workspace —— xtask/check/tests/ 下的
+      # probe 因此在 CI 里从未执行（实证：全量 run 39155097666 日志里 xtask 零命中，
+      # pages_own_ui_probe 与既有的 dep_edge_bin_layer 两条 probe 都被漏掉）。
+      # 这里按上面的 `xtask` 开关补跑：改动碰了 xtask/ 才付 check-* 的编译。
+      # 首次编译含 canon 的 check-* git 依赖，故给 20 分钟（之后吃缓存）。
+      - name: xtask 规则 crate 测试（按 diff 门控）
+        if: steps.scope.outputs.xtask == 'true'
+        timeout-minutes: 20
+        run: cargo test --manifest-path xtask/Cargo.toml
 
       # canon 的 bash 规则 CD-06（主仓 .githooks/spec/code/code_bash.yaml，shellcheck --format=gcc）
       # 在工具缺失的机器上按设计降级为 WARN 跳过，于是 bash 脚本可能长期没人检查
