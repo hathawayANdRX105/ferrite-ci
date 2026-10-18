@@ -1,7 +1,9 @@
 # ferrite 公开壳仓 CI：源码在私有主仓（地址只在下方 PRIVATE_REPO env 出现），由主仓 ci-dispatch 触发。
 # lint 与 test 并行；test 关卡启动 PostgreSQL，数据库测试真实执行。
-# PR（pr 入参非空）走 testless 快关，main/手动 full=true 走全量；主仓在 PR ready_for_review 时也会派发一次 full=true（合并前全量）。
-# 回写的 shell-ci 状态描述在全量 run 带 "(full)" 标记（见 report job DESC），供合并门辨认最近一次是否全量。
+# PR（pr 入参非空）走 testless 快关，main push / 手动 full=true 走全量。
+# 回写主仓的 commit status 按关卡分流两个 context：快关 `shell-ci`（= 合并门，主仓
+# .agent/rules/testing-ci.md 只认它），全量 `shell-ci-full`（合并后异步、不阻塞、不进合并门）。
+# 描述里的 "(full)" 标记保留供人眼辨认；真正的区分靠 context 名，不靠描述文字。
 # 缓存与用法详见 .github/README.md。
 
 name: ci
@@ -485,6 +487,11 @@ jobs:
           # cancelled 与另两关同口径折成 pending，让重派后能重新回写。
           STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
           DESC: "${{ format('ferrite-ci{0}: lint {1}, test {2}, app-shell {3}', inputs.full == 'true' && ' (full)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result) }}"
+          # 快关与全量写**不同的 context**：`shell-ci` 是合并门（主仓 .agent/rules/testing-ci.md
+          # 只认这个名字），`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
+          # 同一个 head commit 上两条 run 抢同一个状态槽、谁后跑完谁覆盖谁，全量红会把合并门
+          # 的绿顶掉（或反过来），`gh pr checks` 也分不清看到的是哪一关。
+          CONTEXT: "${{ inputs.full == 'true' && 'shell-ci-full' || 'shell-ci' }}"
           URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           set -euo pipefail
@@ -496,6 +503,6 @@ jobs:
             exit 0
           fi
           gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
-            -f state="$STATE" -f context=shell-ci -f description="$DESC" -f target_url="$URL" \
+            -f state="$STATE" -f context="$CONTEXT" -f description="$DESC" -f target_url="$URL" \
             > /dev/null
-          echo "status $STATE posted to $TARGET"
+          echo "status $STATE posted to $TARGET as context=$CONTEXT"
