@@ -58,6 +58,22 @@ jobs:
           token: ${{ secrets.FERRITE_PAT }}
           fetch-depth: 0
 
+      # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
+      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
+      # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
+      - name: 判定改动面（docs-only 快通道）
+        id: scope
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+            base="origin/${{ inputs.base }}"
+          else
+            base="HEAD~1"
+          fi
+          mode="$(bash scripts/ci-scope.sh "$base")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo ">>> 改动面判定: $mode（base=$base）"
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
@@ -95,6 +111,7 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
 
       - name: 装 Bun（web 样式构建链）
+        if: steps.scope.outputs.mode != 'docs-only'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -104,6 +121,7 @@ jobs:
       # Bin-layer compat: web entry points move from apps/ to bin/ in mono W5;
       # resolve either generation so both trees pass this step.
       - name: web 样式守卫 + CSS 构建
+        if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
           web_dir=$([ -d bin/web ] && echo bin/web || echo apps/web)
@@ -120,6 +138,7 @@ jobs:
       # grep 无命中在 set -euo pipefail 下同样会把整步带红，exit 0 才是真跳过。
       # mono main 合入 #249 后本 step 自动恢复执行。
       - name: ui-kit/ui-components 契约测试
+        if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 15
         run: |
           set -euo pipefail
@@ -144,9 +163,11 @@ jobs:
         run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
 
       - name: 装 wasm32 目标
+        if: steps.scope.outputs.mode != 'docs-only'
         run: rustup target add wasm32-unknown-unknown
 
       - name: wasm32 编译门禁
+        if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 25
         run: |
           set -euo pipefail
@@ -169,6 +190,7 @@ jobs:
       # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
       # 从快关漏过、把 main 弄红，这里无条件跑死。
       - name: db 迁移布局守卫
+        if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 10
         run: cargo test -p db --test migrations_layout
 
@@ -180,6 +202,7 @@ jobs:
       # （tavern 删除后）时改查另外两种配置：default 与 --no-default-features。
       # 判定问 cargo metadata 要真身（同 ui-kit step 的世代自适应风格）。
       - name: 形态检查（随 apps/api 的别名世代自适应）
+        if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 20
         run: |
           set -euo pipefail
@@ -201,6 +224,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy（全量关卡）
+        if: steps.scope.outputs.mode != 'docs-only'
         run: cargo clippy --all-targets -- -D warnings
 
       # canon 的 bash 规则 CD-06（主仓 .githooks/spec/code/code_bash.yaml，shellcheck --format=gcc）
@@ -271,12 +295,29 @@ jobs:
           token: ${{ secrets.FERRITE_PAT }}
           fetch-depth: 0
 
+      # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
+      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
+      # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
+      - name: 判定改动面（docs-only 快通道）
+        id: scope
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+            base="origin/${{ inputs.base }}"
+          else
+            base="HEAD~1"
+          fi
+          mode="$(bash scripts/ci-scope.sh "$base")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo ">>> 改动面判定: $mode（base=$base）"
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
       # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
       # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
       - name: 装 tauri Linux 依赖
+        if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
           timeout 300 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
@@ -286,6 +327,7 @@ jobs:
 
       # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
       - name: 装 mold + clang
+        if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
           timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
@@ -323,6 +365,7 @@ jobs:
         run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
 
       - name: 端上壳 cargo check（diff 门禁）
+        if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 30
         run: |
           set -euo pipefail
@@ -387,10 +430,27 @@ jobs:
           token: ${{ secrets.FERRITE_PAT }}
           fetch-depth: 0
 
+      # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
+      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
+      # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
+      - name: 判定改动面（docs-only 快通道）
+        id: scope
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+            base="origin/${{ inputs.base }}"
+          else
+            base="HEAD~1"
+          fi
+          mode="$(bash scripts/ci-scope.sh "$base")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo ">>> 改动面判定: $mode（base=$base）"
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
       - name: 装 just（justfile 配方入口）
+        if: steps.scope.outputs.mode != 'docs-only'
         # just.systems CDN 曾 403 挂掉整个 test job；改走 GitHub release +
         # runner 自带 token（免匿名 API 限流）。
         env:
@@ -404,6 +464,7 @@ jobs:
           just --version
 
       - name: 装 mold
+        if: steps.scope.outputs.mode != 'docs-only'
         # apt 镜像曾整段挂死到 job 超时；显式重试 + 硬超时，让故障快速失败可重跑。
         run: |
           set -euo pipefail
@@ -411,6 +472,7 @@ jobs:
           timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
 
       - name: 装 sccache
+        if: steps.scope.outputs.mode != 'docs-only'
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.10.0"
@@ -448,6 +510,7 @@ jobs:
       # PR（pr 非空且非 full）→ test-fast（testless 影响分析；异常 / 零命中自动降级全量）。
       # main push / 手动 full=true → 全量 just test。
       - name: 测试
+        if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.pr }}" ] && [ "${{ inputs.full }}" != "true" ]; then
@@ -479,6 +542,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # 状态描述里点明「这次是不是走了 docs-only 快通道」——否则秒回的绿与跑满 10 分钟
+      # 的绿在 PR 列表里长得一模一样，看的人无从判断这次到底验了什么。
+      # 检出失败不阻断回写：回写状态比描述好看更重要，判定拿不到就按 full 描述。
+      - name: 检出私有源码（判定 docs-only 用）
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: 判定改动面（描述用）
+        id: scope
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.pr }}" ]; then
+            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+            base="origin/${{ inputs.base }}"
+          else
+            base="HEAD~1"
+          fi
+          echo "mode=$(bash scripts/ci-scope.sh "$base")" >> "$GITHUB_OUTPUT"
+
       - name: 回写 commit status
         env:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
@@ -486,7 +574,7 @@ jobs:
           # app-shell-check 无 job 级 if（跳过在 step 内做 notice exit 0），不会被 skipped；
           # cancelled 与另两关同口径折成 pending，让重派后能重新回写。
           STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
-          DESC: "${{ format('ferrite-ci{0}: lint {1}, test {2}, app-shell {3}', inputs.full == 'true' && ' (full)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result) }}"
+          DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, app-shell {4}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result) }}"
           # 快关与全量写**不同的 context**：`shell-ci` 是合并门（主仓 .agent/rules/testing-ci.md
           # 只认这个名字），`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
           # 同一个 head commit 上两条 run 抢同一个状态槽、谁后跑完谁覆盖谁，全量红会把合并门
