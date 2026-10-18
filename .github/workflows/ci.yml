@@ -71,6 +71,13 @@ jobs:
           else
             base="HEAD~1"
           fi
+          # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
+          # 缺失不是代码问题，按 full 跑，别把三关打红。
+          if [ ! -f scripts/ci-scope.sh ]; then
+            echo ">>> scripts/ci-scope.sh 尚未就位（私有仓未合入），按 full 处理"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mode="$(bash scripts/ci-scope.sh "$base")"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
@@ -308,6 +315,13 @@ jobs:
           else
             base="HEAD~1"
           fi
+          # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
+          # 缺失不是代码问题，按 full 跑，别把三关打红。
+          if [ ! -f scripts/ci-scope.sh ]; then
+            echo ">>> scripts/ci-scope.sh 尚未就位（私有仓未合入），按 full 处理"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mode="$(bash scripts/ci-scope.sh "$base")"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
@@ -442,6 +456,13 @@ jobs:
             base="origin/${{ inputs.base }}"
           else
             base="HEAD~1"
+          fi
+          # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
+          # 缺失不是代码问题，按 full 跑，别把三关打红。
+          if [ ! -f scripts/ci-scope.sh ]; then
+            echo ">>> scripts/ci-scope.sh 尚未就位（私有仓未合入），按 full 处理"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           mode="$(bash scripts/ci-scope.sh "$base")"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
