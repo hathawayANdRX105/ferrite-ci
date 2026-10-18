@@ -203,13 +203,11 @@ jobs:
             section "Removed"          '^revert(\([^)]*\))?:'
           } > release-notes.md
           # 每形态一份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
-          # 安全配置示例（占位符/注释字段；compose 专用的 deploy/config/config.toml
-          # 含 compose 服务名/口令，不打包）+ prompt 语料。
+          # prompt 语料。
           # 语料必须是运行时资产：渠道探活（channel_test）从
           # config/prompt-templates.jsonl 读提问语料，二进制不内嵌它
           # （见 control_plane::prompt_templates::load_templates）。
           # 漏打它 → 裸机部署解压即用、但探活报「no prompt template available」。
-          # config.toml.example 文案已说明默认读 ./config/prompt-templates.jsonl。
           mkdir -p dist
           while IFS='|' read -r form _; do
             [ -n "$form" ] || continue
@@ -217,7 +215,6 @@ jobs:
             mkdir -p "dist/${ADIST}/config"
             cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
             cp config/prompt-templates.jsonl "dist/${ADIST}/config/"
-            cp deploy/config/config.toml.example "dist/${ADIST}/config/config.toml.example"
             tar -czf "dist/${ADIST}-linux-x86_64.tar.gz" -C dist "${ADIST}"
             rm -rf "dist/${ADIST}"
           done < shapes.txt
