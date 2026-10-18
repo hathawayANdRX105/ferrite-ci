@@ -65,12 +65,16 @@ jobs:
         id: scope
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.pr }}" ]; then
-            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-            base="origin/${{ inputs.base }}"
-          else
-            base="HEAD~1"
+          # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
+          # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
+          # 和缓存回填一起放弃，故一律按 full。
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> 全量 run（main push / full=true）：不走快通道"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+          base="origin/${{ inputs.base }}"
           # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
           # 缺失不是代码问题，按 full 跑，别把三关打红。
           if [ ! -f scripts/ci-scope.sh ]; then
@@ -309,12 +313,16 @@ jobs:
         id: scope
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.pr }}" ]; then
-            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-            base="origin/${{ inputs.base }}"
-          else
-            base="HEAD~1"
+          # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
+          # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
+          # 和缓存回填一起放弃，故一律按 full。
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> 全量 run（main push / full=true）：不走快通道"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+          base="origin/${{ inputs.base }}"
           # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
           # 缺失不是代码问题，按 full 跑，别把三关打红。
           if [ ! -f scripts/ci-scope.sh ]; then
@@ -451,12 +459,16 @@ jobs:
         id: scope
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.pr }}" ]; then
-            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-            base="origin/${{ inputs.base }}"
-          else
-            base="HEAD~1"
+          # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
+          # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
+          # 和缓存回填一起放弃，故一律按 full。
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> 全量 run（main push / full=true）：不走快通道"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+          base="origin/${{ inputs.base }}"
           # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
           # 缺失不是代码问题，按 full 跑，别把三关打红。
           if [ ! -f scripts/ci-scope.sh ]; then
@@ -580,12 +592,16 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.pr }}" ]; then
-            git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-            base="origin/${{ inputs.base }}"
-          else
-            base="HEAD~1"
+          # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
+          # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
+          # 和缓存回填一起放弃，故一律按 full。
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> 全量 run（main push / full=true）：不走快通道"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+          base="origin/${{ inputs.base }}"
           echo "mode=$(bash scripts/ci-scope.sh "$base")" >> "$GITHUB_OUTPUT"
 
       - name: 回写 commit status
