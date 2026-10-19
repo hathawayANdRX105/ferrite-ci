@@ -15,7 +15,7 @@
 #   单形态世代（别名收敛后）：只出 ferrite-server，default 特性构建（= 原 server
 #   形态；tavern 删除后 default 即完整产品），docker tag 契约不变（server = :latest）。
 # 各形态共用同一 tag、同一 release notes，notes 不按形态分裂。
-# 移动壳（apps/mobile）恒随同一 tag 出一份 Android debug APK：
+# 移动壳（apps|platforms/mobile，shell_root 探测双布局）恒随同一 tag 出一份 Android debug APK：
 #   ferrite-mobile-<版本段>.apk（universal、未 strip，体积大属预期）。
 #   用 debug 签名（免 keystore）——正式签名与产物分发口径由维护者另行裁决；
 #   命令序列取自 W6 spike 的实测配方（todo/w6-spike/README.md §C/§F 同口径），
@@ -23,8 +23,8 @@
 #   构建失败即整条发布失败（原子性：要么全发要么不发）。
 #
 # 版本快照（2026-10-17 壳仓实测，spike run 39013969883 / 39014614301；三处浮点已锁）：
-#   apps/desktop|mobile/package.json  @tauri-apps/cli = 2.12.3（exact，原 ^2.11.5）
-#   apps/*/src-tauri/Cargo.toml      tauri = 2.12.4 / tauri-build = 2.7.3（两条版本线，
+#   apps|platforms/desktop|mobile/package.json  @tauri-apps/cli = 2.12.3（exact，原 ^2.11.5）
+#   apps|platforms/*/src-tauri/Cargo.toml      tauri = 2.12.4 / tauri-build = 2.7.3（两条版本线，
 #                                   均为 exact；原均为 "2" caret）——取值来自壳仓绿 run
 #                                   39013969883 的实编译日志（tauri v2.12.4 + tauri-build v2.7.3）；
 #                                   写同一个号会在依赖解析期直接失败（ferrite #345 撞过）
@@ -225,7 +225,7 @@ jobs:
           du -h dist/*.tar.gz
         id: pkg
 
-      # ---- Android debug APK（apps/mobile；命令序列 = W6 spike 实测配方）----
+      # ---- Android debug APK（apps|platforms/mobile；命令序列 = W6 spike 实测配方）----
       - name: 装 Java 17（Android 构建链）
         if: inputs.mobile == 'true'
         uses: actions/setup-java@v4
@@ -261,9 +261,10 @@ jobs:
 
       - name: 构建 Android debug APK
         if: inputs.mobile == 'true'
-        working-directory: apps/mobile
         run: |
           set -euo pipefail
+          shell_root=$([ -d platforms ] && echo platforms || echo apps)
+          cd "${shell_root}/mobile"
           SPEC="${{ steps.pkg.outputs.dist }}"
           SPEC="${SPEC#ferrite-}"
           bun install

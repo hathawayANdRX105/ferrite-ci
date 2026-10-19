@@ -308,15 +308,15 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
-  # 端上壳编译守卫：apps/{desktop,mobile} 各自独立 workspace，根 Cargo.toml 的 members
+  # 端上壳编译守卫：apps|platforms/{desktop,mobile} 各自独立 workspace（shell_root 探测双布局），根 Cargo.toml 的 members
   # 不含它们，clippy --all-targets / just test 都编不到——而两个壳都在**编译期**调
   # tauri::generate_context!()（读 tauri.conf.json：bundle.icon 缺 RGBA PNG 直接 panic，
   # 上游 tauri-v2.12.4 context.rs:215-224/479-493 + image.rs:79-85）。实测缺口见 #342：
   # 桌面壳 bundle.icon 留空 + icons/ 只有 README，本机 cargo check 一编即 panic，
-  # 而 CI 无任何一步编它（apps/* 不在主 workspace 的依赖图里）。
+  # 而 CI 无任何一步编它（apps|platforms/* 不在主 workspace 的依赖图里）。
   # 本 job 只做 cargo check，不装 Android 工具链：移动壳的 Android 出包由 release.yml
   # 的 android job 承担（dry-run 可验），这里补的是「改配置/图标就红」的编译级回归网。
-  # mold + clang + sccache 不可省：apps/*/src-tauri 向上搜索会命中仓根 .cargo/config.toml
+  # mold + clang + sccache 不可省：apps|platforms/*/src-tauri 向上搜索会命中仓根 .cargo/config.toml
   # （linker=clang、ld-path=mold、rustc-wrapper=sccache），缺任一个都编译不过（spike 实测定论）。
   app-shell-check:
     runs-on: ubuntu-latest
@@ -422,19 +422,20 @@ jobs:
             base="HEAD~1"
           fi
           if [ -n "$base" ]; then
-            echo ">>> 判定 merge-base 范围: ${base}...HEAD（仅 apps/**）"
-            files="$(git diff --name-only "${base}"...HEAD -- apps || true)"
+            echo ">>> 判定 merge-base 范围: ${base}...HEAD（仅 apps|platforms/**）"
+            files="$(git diff --name-only "${base}"...HEAD -- apps platforms || true)"
           else
             echo ">>> 拿不到 base（分支被删 / force-push），保守全量跑"
-            files="apps"
+            files="apps platforms"
           fi
           if [ -z "$files" ]; then
-            echo "::notice::apps/** 无变更，端上壳编译跳过"
+            echo "::notice::apps|platforms 无变更，端上壳编译跳过"
             exit 0
           fi
-          printf '%s\n' "$files" | sed 's/^/  apps 变更: /'
+          printf '%s\n' "$files" | sed 's/^/  壳变更: /'
+          shell_root=$([ -d platforms ] && echo platforms || echo apps)
           for shell in desktop mobile; do
-            dir="apps/${shell}/src-tauri"
+            dir="${shell_root}/${shell}/src-tauri"
             if [ ! -d "$dir" ]; then
               echo ">>> ${dir} 不存在（壳布局变动），跳过 ${shell}"
               continue
