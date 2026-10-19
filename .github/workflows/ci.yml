@@ -142,13 +142,17 @@ jobs:
           # pkgs_resolved 的保守值是 false：它区分「算出来就是空闭包」与「推不出」。
           # 分不开时壳仓只能一律保守，纯 CI 改动的合并就白付一次全仓 clippy（实测 204s）。
           pkgs_resolved="$(printf '%s\n' "$out" | sed -n 's/^pkgs_resolved=//p')"; pkgs_resolved="${pkgs_resolved:-false}"
-          echo ">>> rules=$rules rust=$rust api_forms=$api_forms pkgs_resolved=$pkgs_resolved pkgs='${pkgs:-（空）}'"
+          ui_contracts="$(printf '%s\n' "$out" | sed -n 's/^ui_contracts=//p')"; ui_contracts="${ui_contracts:-true}"
+          db_migrations="$(printf '%s\n' "$out" | sed -n 's/^db_migrations=//p')"; db_migrations="${db_migrations:-true}"
+          echo ">>> rules=$rules rust=$rust api_forms=$api_forms ui_contracts=$ui_contracts db_migrations=$db_migrations pkgs_resolved=$pkgs_resolved pkgs='${pkgs:-（空）}'"
           {
             echo "rules=$rules"
             echo "rust=$rust"
             echo "pkgs=$pkgs"
             echo "api_forms=$api_forms"
             echo "pkgs_resolved=$pkgs_resolved"
+            echo "ui_contracts=$ui_contracts"
+            echo "db_migrations=$db_migrations"
           } >> "$GITHUB_OUTPUT"
 
       - name: Rust 工具链
@@ -214,8 +218,12 @@ jobs:
       # 两个世代都不在树上（前端分层重构未合入的过渡树）时必须显式跳过：
       # grep 无命中在 set -euo pipefail 下同样会把整步带红，exit 0 才是真跳过。
       # mono main 合入 #249 后本 step 自动恢复执行。
+      # 门控判据是「ui-components 在不在改动包 ∪ 反向依赖闭包里」。它守 ui 组件契约与
+      # asset 清单，原先按「testless 看不见资产 diff」无条件跑；但**按包的闭包看得见**：
+      # ui-components 依赖 ui-styles，所以改 crates/ui-styles/assets/** 时它也进面
+      # （实测 closure({ui-styles}) 含 ui-components）。保守值是 true。
       - name: ui-kit/ui-components 契约测试
-        if: steps.scope.outputs.mode != 'docs-only'
+        if: steps.scope.outputs.mode != 'docs-only' && steps.flags.outputs.ui_contracts == 'true'
         timeout-minutes: 15
         run: |
           set -euo pipefail
@@ -271,8 +279,11 @@ jobs:
       # 硬编码任一名字都会把另一侧的 PR 快关卡死在 "package did not match
       # any packages"。问 cargo metadata 要真身；两个世代都不在树上（改名中间态）
       # 时显式跳过并说明，不静默绿也不无谓带红。
+      # 判据：app-db 或 db 在闭包里（世代自适应，与 flags 脚本同口径）。
+      # 迁移目录已随包移到 crates/app-db/migrations，落在包目录树下、闭包天然覆盖；
+      # 旧世代的 db/migrations 由 flags 脚本里的迁移补丁兜。保守值是 true。
       - name: db/app-db 迁移布局守卫（世代自适应）
-        if: steps.scope.outputs.mode != 'docs-only'
+        if: steps.scope.outputs.mode != 'docs-only' && steps.flags.outputs.db_migrations == 'true'
         timeout-minutes: 10
         run: |
           set -euo pipefail
