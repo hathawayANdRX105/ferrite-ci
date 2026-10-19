@@ -30,6 +30,10 @@ on:
         description: 'true = 强制全量测试'
         required: false
         default: 'false'
+      before:
+        description: '条件全量的判定基准：本次 push 之前的 main（空 = 回落 HEAD^）'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -123,11 +127,13 @@ jobs:
           rules="$(printf '%s\n' "$out" | sed -n 's/^rules=//p')"; rules="${rules:-true}"
           rust="$(printf '%s\n' "$out" | sed -n 's/^rust=//p')";   rust="${rust:-true}"
           pkgs="$(printf '%s\n' "$out" | sed -n 's/^pkgs=//p')"
-          echo ">>> rules=$rules rust=$rust pkgs='${pkgs:-（空→全仓）}'"
+          api_forms="$(printf '%s\n' "$out" | sed -n 's/^api_forms=//p')"; api_forms="${api_forms:-true}"
+          echo ">>> rules=$rules rust=$rust api_forms=$api_forms pkgs='${pkgs:-（空→全仓）}'"
           {
             echo "rules=$rules"
             echo "rust=$rust"
             echo "pkgs=$pkgs"
+            echo "api_forms=$api_forms"
           } >> "$GITHUB_OUTPUT"
 
       - name: Rust 工具链
@@ -270,8 +276,11 @@ jobs:
       # feature 统一（#10266）也让它们绝不能进共享 crate。别名收敛成单形态
       # （tavern 删除后）时改查另外两种配置：default 与 --no-default-features。
       # 判定问 cargo metadata 要真身（同 ui-kit step 的世代自适应风格）。
+      # 形态检查跑 `cargo check -p api --no-default-features --features <别名>` × N，实测 99s。
+      # 形态是 api 的 feature 面，只有 api 自身、或它（传递地）依赖的东西变了才可能红 ——
+      # 而 `api_forms` 判的正是「api 是否落在改动包 ∪ 反向依赖闭包里」。保守值是 true。
       - name: 形态检查（随 apps/api 的别名世代自适应）
-        if: steps.scope.outputs.mode != 'docs-only'
+        if: steps.scope.outputs.mode != 'docs-only' && steps.flags.outputs.api_forms == 'true'
         timeout-minutes: 20
         run: |
           set -euo pipefail
@@ -628,8 +637,18 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
 
-      - name: 装 testless（test-fast 的影响分析器，仅 PR 快关需要）
+      # testless 是 `cargo install` 出来的工具，每次 PR 重装要 29s（实测 run 39233448121）。
+      # 它不在 Cargo.lock 里，所以键是版本化的静态值：**升级 testless 时必须同步改 v1**。
+      - name: Cache testless 二进制
+        id: testless-bin
         if: inputs.pr != '' && inputs.full != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/testless
+          key: testless-bin-${{ runner.os }}-v1
+
+      - name: 装 testless（test-fast 的影响分析器，仅 PR 快关需要）
+        if: inputs.pr != '' && inputs.full != 'true' && steps.testless-bin.outputs.cache-hit != 'true'
         run: cargo install testless --locked
 
       # PR 快关需要本地 origin/<base> ref（checkout sha 是 detached）。
@@ -641,14 +660,20 @@ jobs:
       # main push / 手动 full=true → 全量 just test。
       - name: 测试
         if: steps.scope.outputs.mode != 'docs-only'
+        env:
+          BEFORE: ${{ inputs.before }}
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.pr }}" ] && [ "${{ inputs.full }}" != "true" ]; then
             echo ">>> PR 快关：just test-fast（testless diff 影响分析）"
             just test-fast origin/${{ inputs.base }}
           else
-            echo ">>> 全量关卡：just test"
-            just test
+            # 条件全量：按「改动包 ∪ 反向依赖闭包」收窄测试面，但保住全仓编译检查。
+            # 判定基准优先用 dispatch 传的 before（本次 push 之前的 main）；缺省回落
+            # HEAD^（本仓 main 只收 squash 合并，一个 push 一个提交，故 HEAD^ 等价）。
+            # 两者都取不到时 scripts/test-full.sh 自己会回落 workspace 全量。
+            echo ">>> 条件全量：just test-scoped（闭包范围）"
+            just test-scoped "${BEFORE:-HEAD^}"
           fi
 
       - name: 回填 cargo 缓存（仅写入方）
