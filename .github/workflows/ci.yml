@@ -30,8 +30,11 @@ on:
         description: 'true = 强制全量测试'
         required: false
         default: 'false'
+      # 保留但**不再读取**：条件全量的判定基准已改为壳仓自己算（HEAD^）。
+      # 留着的唯一原因是「未知 input 会被 workflow_dispatch 以 422 整单拒收」——
+      # 删掉声明会让任何还在传它的 dispatch 直接派不出去。下次大改时再摘。
       before:
-        description: '条件全量的判定基准：本次 push 之前的 main（空 = 回落 HEAD^）'
+        description: '（已弃用，保留仅为兼容旧 dispatch）条件全量的判定基准'
         required: false
         default: ''
 
@@ -112,8 +115,6 @@ jobs:
       # 壳仓先合而把门禁改松。
       - name: 读取步骤级标志（rules / rust / pkgs）
         id: flags
-        env:
-          BEFORE: ${{ inputs.before }}
         run: |
           set -euo pipefail
           if [ "${{ inputs.full }}" = "true" ]; then
@@ -127,13 +128,14 @@ jobs:
             # PR：与本分支自己的改动比（三点；base 传分支名，脚本内部走 merge-base）。
             out="$(bash scripts/ci-scope-flags.sh "origin/${{ inputs.base }}" three-dot || true)"
           else
-            # main push：与本次 push 之前的 main 比（两点）。before 缺省回落 HEAD^ ——
-            # 本仓 main 只收 squash 合并，一个 push 一个提交，两者等价。
-            # 全零 SHA 是 git 对新分支 / 强推的占位，不是真的「上一个状态」。
-            base="${BEFORE:-HEAD^}"
-            printf '%s' "$base" | grep -qE '^0+$' && base="HEAD^"
-            echo ">>> main push：判定基准 = $base（两点）"
-            out="$(bash scripts/ci-scope-flags.sh "$base" two-dot || true)"
+            # main push：与本次 push 之前的 main 比（两点）。
+            # 基准由**自己算**（`HEAD^`）而不是靠私有仓传 `before` —— 那个 input 是跨仓
+            # 契约，两仓落地有时间差；一旦私有仓先合、这边还不认识它，workflow_dispatch
+            # 会以 422 整单拒收（实测踩过：整个 CI 一次都没跑）。
+            # 本仓 main 只收 squash 合并，一个 push 一个提交，`HEAD^` 就是上一个 main 状态。
+            # checkout 是 detached 的 `inputs.sha`，HEAD 即被测提交。
+            echo ">>> main push：判定基准 = HEAD^（两点，自算）"
+            out="$(bash scripts/ci-scope-flags.sh 'HEAD^' two-dot || true)"
           fi
           rules="$(printf '%s\n' "$out" | sed -n 's/^rules=//p')"; rules="${rules:-true}"
           rust="$(printf '%s\n' "$out" | sed -n 's/^rust=//p')";   rust="${rust:-true}"
@@ -691,8 +693,6 @@ jobs:
       # main push / 手动 full=true → 全量 just test。
       - name: 测试
         if: steps.scope.outputs.mode != 'docs-only'
-        env:
-          BEFORE: ${{ inputs.before }}
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.pr }}" ] && [ "${{ inputs.full }}" != "true" ]; then
@@ -700,11 +700,10 @@ jobs:
             just test-fast origin/${{ inputs.base }}
           else
             # 条件全量：按「改动包 ∪ 反向依赖闭包」收窄测试面，但保住全仓编译检查。
-            # 判定基准优先用 dispatch 传的 before（本次 push 之前的 main）；缺省回落
-            # HEAD^（本仓 main 只收 squash 合并，一个 push 一个提交，故 HEAD^ 等价）。
-            # 两者都取不到时 scripts/test-full.sh 自己会回落 workspace 全量。
+            # 判定基准 `HEAD^` 自算（同上面 flags 步骤的理由：不靠跨仓 input）。
+            # 取不到时 scripts/test-full.sh 自己会回落 workspace 全量。
             echo ">>> 条件全量：just test-scoped（闭包范围）"
-            just test-scoped "${BEFORE:-HEAD^}"
+            just test-scoped 'HEAD^'
           fi
 
       - name: 回填 cargo 缓存（仅写入方）
