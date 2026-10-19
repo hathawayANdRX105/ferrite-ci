@@ -234,7 +234,7 @@ jobs:
             exit 0
           fi
           echo "kit contract gate: package = $PKG"
-          cargo test -p "$PKG" --tests
+          cargo test -p "$PKG" --tests --profile ci
 
       # wasm32 编译门禁：AGENTS.md 要求 crates/web 下必须支持 wasm32-unknown-unknown，
       # 而本仓 CI 此前没有任何一步在编 wasm（唯一真编点是部署镜像）——规则等于无人把守。
@@ -293,7 +293,7 @@ jobs:
             exit 0
           fi
           echo "migration layout gate: package = $PKG"
-          cargo test -p "$PKG" --test migrations_layout
+          cargo test -p "$PKG" --test migrations_layout --profile ci
 
       # 形态回归网：apps/api 的形态面。形态别名（ferrite-*）存在时逐个 check
       # --no-default-features --features <别名>——default（三形态世代 = ferrite-server）
@@ -345,13 +345,13 @@ jobs:
             echo ">>> 闭包为空且已算出（改动不落在任何包上）→ 无代码可变，跳过 clippy"
           elif [ -z "${pkgs// }" ]; then
             echo ">>> pkgs 推不出（脚本缺席 / 拿不到 diff）→ 全仓 clippy（保守）"
-            cargo clippy --all-targets -- -D warnings
+            cargo clippy --all-targets --profile ci -- -D warnings
           else
             args=()
             n=0
             for p in $pkgs; do args+=(-p "$p"); n=$((n + 1)); done
             echo ">>> clippy 收窄到 ${n} 个包（改动包 ∪ 反向依赖）"
-            cargo clippy --all-targets "${args[@]}" -- -D warnings
+            cargo clippy --all-targets --profile ci "${args[@]}" -- -D warnings
           fi
 
       # xtask 是独立 workspace（自己的 Cargo.toml / Cargo.lock / target），而全量配方
@@ -363,6 +363,8 @@ jobs:
       - name: xtask 规则 crate 测试（按 diff 门控）
         if: steps.scope.outputs.xtask == 'true'
         timeout-minutes: 20
+        # 不加 --profile ci：xtask 是**独立 workspace**（自己的 Cargo.toml / target），
+        # 根 Cargo.toml 的 [profile] 对它不生效，加了只会报 profile 不存在。
         run: cargo test --manifest-path xtask/Cargo.toml
 
       # canon 的 bash 规则 CD-06（主仓 .githooks/spec/code/code_bash.yaml，shellcheck --format=gcc）
@@ -402,7 +404,7 @@ jobs:
       - name: 规范文档工具名守卫
         if: steps.flags.outputs.rules == 'true'
         timeout-minutes: 15
-        run: cargo test -p harness-agent-prompts --test tool_selection_tests
+        run: cargo test -p harness-agent-prompts --test tool_selection_tests --profile ci
 
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
