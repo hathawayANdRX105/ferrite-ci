@@ -308,8 +308,9 @@ jobs:
             cargo clippy --all-targets -- -D warnings
           else
             args=()
-            for p in $pkgs; do args+=(-p "$p"); done
-            echo ">>> clippy 收窄到 ${#args[@]} 个包（改动包 ∪ 反向依赖）"
+            n=0
+            for p in $pkgs; do args+=(-p "$p"); n=$((n + 1)); done
+            echo ">>> clippy 收窄到 ${n} 个包（改动包 ∪ 反向依赖）"
             cargo clippy --all-targets "${args[@]}" -- -D warnings
           fi
 
