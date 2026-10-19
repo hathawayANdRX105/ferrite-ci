@@ -213,10 +213,23 @@ jobs:
       # 迁移布局守卫（无 PG 可跑）：版本前缀重复 / 正文混入 git log 行。
       # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
       # 从快关漏过、把 main 弄红，这里无条件跑死。
-      - name: db 迁移布局守卫
+      # 包名自适应：主仓 main 与在途分支可能分别处于 db / app-db 两个世代
+      # （单例 crate 加 app- 前缀的改名波次，同 ui-kit step 的时序耦合病），
+      # 硬编码任一名字都会把另一侧的 PR 快关卡死在 "package did not match
+      # any packages"。问 cargo metadata 要真身；两个世代都不在树上（改名中间态）
+      # 时显式跳过并说明，不静默绿也不无谓带红。
+      - name: db/app-db 迁移布局守卫（世代自适应）
         if: steps.scope.outputs.mode != 'docs-only'
         timeout-minutes: 10
-        run: cargo test -p db --test migrations_layout
+        run: |
+          set -euo pipefail
+          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '[.packages[].name] | map(select(. == "app-db" or . == "db")) | first // empty')
+          if [ -z "$PKG" ]; then
+            echo ">>> 树上没有 app-db / db（改名波次的中间态）；迁移布局守卫按包缺席跳过。"
+            exit 0
+          fi
+          echo "migration layout gate: package = $PKG"
+          cargo test -p "$PKG" --test migrations_layout
 
       # 形态回归网：apps/api 的形态面。形态别名（ferrite-*）存在时逐个 check
       # --no-default-features --features <别名>——default（三形态世代 = ferrite-server）
