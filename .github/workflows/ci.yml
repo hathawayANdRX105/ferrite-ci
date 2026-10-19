@@ -112,28 +112,43 @@ jobs:
       # 壳仓先合而把门禁改松。
       - name: 读取步骤级标志（rules / rust / pkgs）
         id: flags
+        env:
+          BEFORE: ${{ inputs.before }}
         run: |
           set -euo pipefail
-          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
-            echo ">>> 全量 run：步骤级标志一律保守"
+          if [ "${{ inputs.full }}" = "true" ]; then
+            # 显式 full=true 是人明确要全量，不是自动车道 —— 不走收窄。
+            echo ">>> 手动 full=true：步骤级标志一律保守"
             out=""
           elif [ ! -f scripts/ci-scope-flags.sh ]; then
             echo ">>> scripts/ci-scope-flags.sh 尚未就位（私有仓未合入）→ 保守：全跑"
             out=""
+          elif [ -n "${{ inputs.pr }}" ]; then
+            # PR：与本分支自己的改动比（三点；base 传分支名，脚本内部走 merge-base）。
+            out="$(bash scripts/ci-scope-flags.sh "origin/${{ inputs.base }}" three-dot || true)"
           else
-            base="origin/${{ inputs.base }}"
-            out="$(bash scripts/ci-scope-flags.sh "$base" || true)"
+            # main push：与本次 push 之前的 main 比（两点）。before 缺省回落 HEAD^ ——
+            # 本仓 main 只收 squash 合并，一个 push 一个提交，两者等价。
+            # 全零 SHA 是 git 对新分支 / 强推的占位，不是真的「上一个状态」。
+            base="${BEFORE:-HEAD^}"
+            printf '%s' "$base" | grep -qE '^0+$' && base="HEAD^"
+            echo ">>> main push：判定基准 = $base（两点）"
+            out="$(bash scripts/ci-scope-flags.sh "$base" two-dot || true)"
           fi
           rules="$(printf '%s\n' "$out" | sed -n 's/^rules=//p')"; rules="${rules:-true}"
           rust="$(printf '%s\n' "$out" | sed -n 's/^rust=//p')";   rust="${rust:-true}"
           pkgs="$(printf '%s\n' "$out" | sed -n 's/^pkgs=//p')"
           api_forms="$(printf '%s\n' "$out" | sed -n 's/^api_forms=//p')"; api_forms="${api_forms:-true}"
-          echo ">>> rules=$rules rust=$rust api_forms=$api_forms pkgs='${pkgs:-（空→全仓）}'"
+          # pkgs_resolved 的保守值是 false：它区分「算出来就是空闭包」与「推不出」。
+          # 分不开时壳仓只能一律保守，纯 CI 改动的合并就白付一次全仓 clippy（实测 204s）。
+          pkgs_resolved="$(printf '%s\n' "$out" | sed -n 's/^pkgs_resolved=//p')"; pkgs_resolved="${pkgs_resolved:-false}"
+          echo ">>> rules=$rules rust=$rust api_forms=$api_forms pkgs_resolved=$pkgs_resolved pkgs='${pkgs:-（空）}'"
           {
             echo "rules=$rules"
             echo "rust=$rust"
             echo "pkgs=$pkgs"
             echo "api_forms=$api_forms"
+            echo "pkgs_resolved=$pkgs_resolved"
           } >> "$GITHUB_OUTPUT"
 
       - name: Rust 工具链
@@ -312,8 +327,13 @@ jobs:
         run: |
           set -euo pipefail
           pkgs="${{ steps.flags.outputs.pkgs }}"
-          if [ -z "${pkgs// }" ]; then
-            echo ">>> pkgs 为空（脚本缺席或推不出）→ 全仓 clippy（保守）"
+          resolved="${{ steps.flags.outputs.pkgs_resolved }}"
+          if [ -z "${pkgs// }" ] && [ "$resolved" = "true" ]; then
+            # 闭包算出来了，而且确实是空的：本次改动不落在任何包上（纯 CI / 脚本 /
+            # 文档类）。没有代码可变，clippy 查不出新东西 —— 而全仓要 204s。
+            echo ">>> 闭包为空且已算出（改动不落在任何包上）→ 无代码可变，跳过 clippy"
+          elif [ -z "${pkgs// }" ]; then
+            echo ">>> pkgs 推不出（脚本缺席 / 拿不到 diff）→ 全仓 clippy（保守）"
             cargo clippy --all-targets -- -D warnings
           else
             args=()
