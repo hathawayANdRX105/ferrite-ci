@@ -164,7 +164,8 @@ jobs:
           timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
           timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang shellcheck
 
-      - name: 装 sccache
+      - name: 装 sccache（服务器通道用预装版：action 从 github.com/releases 下载，服务器该域直连被墙）
+        if: needs.decide.outputs.where != 'server'
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.10.0"
@@ -192,8 +193,8 @@ jobs:
             sccache-lint-${{ runner.os }}-v0.10.0-
             sccache-test-${{ runner.os }}-v0.10.0-
 
-      - name: 装 Bun（web 样式构建链）
-        if: steps.scope.outputs.mode != 'docs-only'
+      - name: 装 Bun（web 样式构建链；服务器通道用预装版：action 从 github.com/releases 下载，服务器该域直连被墙）
+        if: steps.scope.outputs.mode != 'docs-only' && needs.decide.outputs.where != 'server'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -438,7 +439,8 @@ jobs:
           timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
 
       # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
-      - name: 装 sccache
+      - name: 装 sccache（服务器通道用预装版：action 从 github.com/releases 下载，服务器该域直连被墙）
+        if: needs.decide.outputs.where != 'server'
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.10.0"
@@ -597,8 +599,8 @@ jobs:
           timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
           timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
 
-      - name: 装 sccache
-        if: steps.scope.outputs.mode != 'docs-only'
+      - name: 装 sccache（服务器通道用预装版：action 从 github.com/releases 下载，服务器该域直连被墙）
+        if: steps.scope.outputs.mode != 'docs-only' && needs.decide.outputs.where != 'server'
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.10.0"
