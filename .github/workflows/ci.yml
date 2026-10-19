@@ -98,6 +98,38 @@ jobs:
           mode="$(bash scripts/ci-scope.sh "$base")"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
+
+      # 步骤级改动面标志：让同一个 job 里的重活按 diff 跳过，而不是整 job 跳。
+      # 产出方是私有仓的 scripts/ci-scope-flags.sh（与 ci-scope.sh 同源，但那个给 job
+      # 级的 docs-only 快通道，这个给步骤级开关）。
+      #
+      # 两处分仓落地的时间差按「缺席即保守」处理：脚本不在树上就全给 true / 空 pkgs，
+      # 于是 clippy 全跑、doc 守卫全跑 —— 与加这个步骤之前的行为完全一致，不会因为
+      # 壳仓先合而把门禁改松。
+      - name: 读取步骤级标志（rules / rust / pkgs）
+        id: flags
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> 全量 run：步骤级标志一律保守"
+            out=""
+          elif [ ! -f scripts/ci-scope-flags.sh ]; then
+            echo ">>> scripts/ci-scope-flags.sh 尚未就位（私有仓未合入）→ 保守：全跑"
+            out=""
+          else
+            base="origin/${{ inputs.base }}"
+            out="$(bash scripts/ci-scope-flags.sh "$base" || true)"
+          fi
+          rules="$(printf '%s\n' "$out" | sed -n 's/^rules=//p')"; rules="${rules:-true}"
+          rust="$(printf '%s\n' "$out" | sed -n 's/^rust=//p')";   rust="${rust:-true}"
+          pkgs="$(printf '%s\n' "$out" | sed -n 's/^pkgs=//p')"
+          echo ">>> rules=$rules rust=$rust pkgs='${pkgs:-（空→全仓）}'"
+          {
+            echo "rules=$rules"
+            echo "rust=$rust"
+            echo "pkgs=$pkgs"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
@@ -247,9 +279,26 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
 
-      - name: cargo clippy（全量关卡）
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: cargo clippy --all-targets -- -D warnings
+      # clippy 的收窄面是「改动包 ∪ 它们的 workspace 反向依赖」，由私有仓的
+      # scripts/ci-scope-flags.sh 算出。闭包是必需品不是优化：
+      #   `cargo clippy -p A` 只 lint A 及其**依赖**，不 lint A 的**下游**。
+      #   改了共享 crate 让下游触发新的 lint 错误时，只查改动包会漏，红会流到 main。
+      #   闭包对叶子包很小（真省），对被广泛依赖的包会自然长到接近全仓（此时本来就该全查）。
+      # pkgs 为空（脚本缺席 / 推不出）一律回落全仓，保守。
+      - name: cargo clippy（改动包 ∪ 反向依赖）
+        if: steps.scope.outputs.mode != 'docs-only' && steps.flags.outputs.rust == 'true'
+        run: |
+          set -euo pipefail
+          pkgs="${{ steps.flags.outputs.pkgs }}"
+          if [ -z "${pkgs// }" ]; then
+            echo ">>> pkgs 为空（脚本缺席或推不出）→ 全仓 clippy（保守）"
+            cargo clippy --all-targets -- -D warnings
+          else
+            args=()
+            for p in $pkgs; do args+=(-p "$p"); done
+            echo ">>> clippy 收窄到 ${#args[@]} 个包（改动包 ∪ 反向依赖）"
+            cargo clippy --all-targets "${args[@]}" -- -D warnings
+          fi
 
       # xtask 是独立 workspace（自己的 Cargo.toml / Cargo.lock / target），而全量配方
       # `just test` = `cargo test --all` 只覆盖根 workspace —— xtask/check/tests/ 下的
@@ -283,12 +332,21 @@ jobs:
           shellcheck --severity=style --format=gcc "${real[@]}"
 
       # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-prompts 的
-      # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册（testless 的 seed 只来自 Rust 文件，
-      # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main，故这里无条件跑死）。
+      # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册。
+      #
+      # 门控理由的演进：早先它**无条件跑死**，依据是「testless 的 seed 只来自 Rust 文件，
+      # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main」。那条对 testless 成立，
+      # 但路径检查直接看得见 .md —— 改由 ci-scope-flags.sh 的 `rules` 开关门控，
+      # 只在本轮 diff 真碰 `.agent/rules/**` 或 `crates/harness-agent-prompts/**` 时跑。
+      # 安全边界与先前一致：`rules` 的保守值是 true（脚本缺席 / 拿不到 base 一律跑），
+      # 且它的触发面正是这条守卫唯一会红的两处。
+      #
       # 位置与上面的 shell 闸门同理放在 fmt/clippy 之后：步骤一红，后面的步骤全被 skipped。
       # 它是本 job 首次 codegen + 链接 harness-agent-prompts 的 dev-dep tools（ast-grep + tree-sitter
       # C 语法 + host 侧 db/turso），构建量级高于 db 守卫，故给 15 分钟（同 ui-kit 契约测试）。
+      # 实测代价：run 39212811029 里这一步 102s，而多数 PR 的 diff 碰不到它的触发面。
       - name: 规范文档工具名守卫
+        if: steps.flags.outputs.rules == 'true'
         timeout-minutes: 15
         run: cargo test -p harness-agent-prompts --test tool_selection_tests
 
