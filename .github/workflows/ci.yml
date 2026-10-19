@@ -5,6 +5,15 @@
 # .agent/rules/testing-ci.md 只认它），全量 `shell-ci-full`（合并后异步、不阻塞、不进合并门）。
 # 描述里的 "(full)" 标记保留供人眼辨认；真正的区分靠 context 名，不靠描述文字。
 # 缓存与用法详见 .github/README.md。
+#
+# 运行位置（2026-10：服务器 self-hosted runner 接入后为双执行面）：
+# decide 关卡按 runner_mode 选执行面——auto（默认）= 本仓 self-hosted runner 在线且空闲则
+# 用服务器，否则回落 GitHub hosted；server / hosted = 强制（server 强制时 runner 离线会一直
+# 排队等待，不回落——这是强制语义）。三个重活关卡（lint-check / test / app-shell-check）
+# 跟随 decide；report 恒在 hosted（服务器挂掉也要能回写状态）。
+# 服务器通道用本地磁盘缓存（~/.cargo、~/.cache/sccache 随 runner 持久），跳过 actions/cache
+# 的恢复/回填（见各缓存步骤的 where != 'server' 条件）；hosted 通道缓存行为不变。
+# 服务器租期约 6 个月：到期 runner 掉线后 auto 自动回落 hosted，无需改本文件。
 
 name: ci
 
@@ -30,6 +39,10 @@ on:
         description: 'true = 强制全量测试'
         required: false
         default: 'false'
+      runner_mode:
+        description: 'auto = 服务器 runner 在线且空闲则用服务器、否则 hosted；server / hosted = 强制'
+        required: false
+        default: 'auto'
 
 permissions:
   contents: read
@@ -44,11 +57,54 @@ env:
   PRIVATE_REPO: hathawayANdRX105/ferrite
 
 jobs:
+  # 运行位置决策（唯一判定点）：三个重活关卡的 runs-on 跟随本关卡输出的 labels。
+  # 判定 = 本仓 self-hosted runner 的在线空闲状态（List runners API；github.token 没有
+  # administration 权限，用 FERRITE_PAT——实测结论见 runner-check workflow 的 token 自检步骤）。
+  # 查询失败（权限 / 网络）一律回落 hosted：CI 可用性优先于对服务器的偏好。
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      labels: ${{ steps.pick.outputs.labels }}
+      where: ${{ steps.pick.outputs.where }}
+    steps:
+      - name: 选运行位置
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          MODE: ${{ inputs.runner_mode }}
+        run: |
+          set -euo pipefail
+          use_hosted() { echo 'labels=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"; echo 'where=hosted' >> "$GITHUB_OUTPUT"; }
+          use_server() { echo 'labels=["self-hosted","ferrite-ci"]' >> "$GITHUB_OUTPUT"; echo 'where=server' >> "$GITHUB_OUTPUT"; }
+          case "${MODE:-auto}" in
+            hosted)
+              echo ">>> 运行位置：GitHub hosted（runner_mode=hosted 强制）"
+              use_hosted
+              exit 0
+              ;;
+            server)
+              echo ">>> 运行位置：服务器 self-hosted（runner_mode=server 强制；runner 离线则排队等待）"
+              use_server
+              exit 0
+              ;;
+          esac
+          idle=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runners" \
+            --jq '[.runners[] | select(.status == "online" and .busy == false)] | length' 2>/dev/null || echo 0)
+          if [ "${idle:-0}" -ge 1 ] 2>/dev/null; then
+            echo ">>> 运行位置：服务器 self-hosted（在线空闲 runner ${idle} 台）"
+            use_server
+          else
+            echo ">>> 运行位置：GitHub hosted（无在线空闲的 self-hosted runner）"
+            use_hosted
+          fi
+
   # 格式化与静态检查，不依赖数据库。
   lint-check:
-    runs-on: ubuntu-latest
-    # 壳仓缓存冷启（清缓存后首个 run）全量编译需要余量。
-    timeout-minutes: 45
+    needs: [decide]
+    runs-on: ${{ fromJSON(needs.decide.outputs.labels) }}
+    # 壳仓缓存冷启（清缓存后首个 run）全量编译需要余量；服务器 2 核突发机更慢，取宽值。
+    timeout-minutes: 90
     steps:
       - name: 检出私有源码（PAT）
         uses: actions/checkout@v4
@@ -113,7 +169,8 @@ jobs:
         with:
           version: "v0.10.0"
 
-      - name: Cache 依赖（restore-only，写回归写入方 run）
+      - name: Cache 依赖（restore-only，写回归写入方 run；服务器通道用本地磁盘缓存，跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cargo
@@ -125,7 +182,8 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（lint 角色，restore-only）
+      - name: Cache sccache 产物（lint 角色，restore-only；服务器通道跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
@@ -294,15 +352,15 @@ jobs:
 
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
-      - name: 回填 cargo 缓存（仅写入方）
-        if: always() && (inputs.pr == '' || inputs.full == 'true')
+      - name: 回填 cargo 缓存（仅写入方；服务器通道用本地磁盘缓存，不回填）
+        if: always() && needs.decide.outputs.where != 'server' && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: 回填 sccache 缓存（仅写入方，日键）
-        if: always() && (inputs.pr == '' || inputs.full == 'true')
+      - name: 回填 sccache 缓存（仅写入方，日键；服务器通道不回填）
+        if: always() && needs.decide.outputs.where != 'server' && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache
@@ -319,8 +377,9 @@ jobs:
   # mold + clang + sccache 不可省：apps|platforms/*/src-tauri 向上搜索会命中仓根 .cargo/config.toml
   # （linker=clang、ld-path=mold、rustc-wrapper=sccache），缺任一个都编译不过（spike 实测定论）。
   app-shell-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    needs: [decide]
+    runs-on: ${{ fromJSON(needs.decide.outputs.labels) }}
+    timeout-minutes: 60
     steps:
       - name: 检出私有源码（PAT）
         uses: actions/checkout@v4
@@ -384,7 +443,8 @@ jobs:
         with:
           version: "v0.10.0"
 
-      - name: Cache 依赖（restore-only，写回归写入方 run）
+      - name: Cache 依赖（restore-only，写回归写入方 run；服务器通道用本地磁盘缓存，跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cargo
@@ -396,7 +456,8 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（app-shell 角色，restore-only）
+      - name: Cache sccache 产物（app-shell 角色，restore-only；服务器通道跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
@@ -447,8 +508,9 @@ jobs:
 
   # 测试连接临时 PostgreSQL；db_bootstrap 在测试启动时应用迁移。
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
+    needs: [decide]
+    runs-on: ${{ fromJSON(needs.decide.outputs.labels) }}
+    timeout-minutes: 120
     services:
       postgres:
         # 钉版本（与 deploy/compose.yml 同口径）：TimescaleDB 正把压缩 API
@@ -515,6 +577,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # 服务器 runner 预装 just（那里到 GitHub release 的带宽只有 ~16KB/s，
+          # 每个 test job 重下一遍纯浪费）；GitHub hosted 镜像无预装，行为不变。
+          if command -v just >/dev/null 2>&1; then
+            echo "just already present: $(just --version)"
+            exit 0
+          fi
           tag=$(gh api repos/casey/just/releases/latest --jq .tag_name)
           gh release download "$tag" -R casey/just \
             -p "just-*x86_64-unknown-linux-musl.tar.gz" -O - | tar xzf - just
@@ -535,7 +603,8 @@ jobs:
         with:
           version: "v0.10.0"
 
-      - name: Cache 依赖（restore-only，写回归写入方 run）
+      - name: Cache 依赖（restore-only，写回归写入方 run；服务器通道用本地磁盘缓存，跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cargo
@@ -547,7 +616,8 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（test 角色，restore-only）
+      - name: Cache sccache 产物（test 角色，restore-only；服务器通道跳过）
+        if: needs.decide.outputs.where != 'server'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
@@ -579,15 +649,15 @@ jobs:
             just test
           fi
 
-      - name: 回填 cargo 缓存（仅写入方）
-        if: always() && (inputs.pr == '' || inputs.full == 'true')
+      - name: 回填 cargo 缓存（仅写入方；服务器通道用本地磁盘缓存，不回填）
+        if: always() && needs.decide.outputs.where != 'server' && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: 回填 sccache 缓存（仅写入方，日键）
-        if: always() && (inputs.pr == '' || inputs.full == 'true')
+      - name: 回填 sccache 缓存（仅写入方，日键；服务器通道不回填）
+        if: always() && needs.decide.outputs.where != 'server' && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache
@@ -597,6 +667,7 @@ jobs:
   report:
     needs: [lint-check, test, app-shell-check]
     if: always()
+    # 恒在 hosted：状态回写不依赖服务器（服务器挂掉/离线时仍要能收口状态）。
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
