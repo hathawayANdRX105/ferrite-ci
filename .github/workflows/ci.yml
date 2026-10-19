@@ -672,6 +672,24 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
 
+      # nextest 是 test-fast / test-full 的**测试运行器**（两条车道都用它）。
+      # 用官方预编译包而不是 `cargo install cargo-nextest` —— 后者要自己编十几分钟。
+      # 二进制约 12M，缓存它省一次下载；升级 nextest 时同步改 v1。
+      - name: Cache nextest 二进制
+        id: nextest-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: nextest-bin-${{ runner.os }}-v1
+
+      - name: 装 nextest
+        if: steps.nextest-bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -LsSf --retry 3 --retry-delay 5 https://get.nexte.st/latest/linux \
+            | tar zxf - -C "$HOME/.cargo/bin"
+          cargo nextest --version
+
       # testless 是 `cargo install` 出来的工具，每次 PR 重装要 29s（实测 run 39233448121）。
       # 它不在 Cargo.lock 里，所以键是版本化的静态值：**升级 testless 时必须同步改 v1**。
       - name: Cache testless 二进制
