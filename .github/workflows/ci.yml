@@ -803,3 +803,80 @@ jobs:
             -f state="$STATE" -f context="$CONTEXT" -f description="$DESC" -f target_url="$URL" \
             > /dev/null
           echo "status $STATE posted to $TARGET as context=$CONTEXT"
+
+  # rust-specs 规范检查（合并门辅助）：PR 快关额外回写 `rust-specs` commit status。
+  # 用公开 rust-specs 仓的 xtask 检查 PR 标题/正文是否符合 GitHub 规范（替代 canon 的
+  # PR 格式拦截）；回写落点 = status_sha（PR 头提交），与 shell-ci 同对象，gh pr checks 可见。
+  # 只对 PR 跑：main push / full 是合并后的兜底，不涉及 PR 创建格式门禁。
+  rust-specs-check:
+    if: inputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出 rust-specs（公开仓）
+        uses: actions/checkout@v4
+        with:
+          repository: hathawayANdRX105/rust-specs
+          ref: main
+          fetch-depth: 1
+
+      - name: 装 Rust 工具链（rust-specs 固定 nightly）
+        uses: dtolnay/rust-toolchain@nightly
+        # rust-specs 仓根 rust-toolchain.toml 固定 nightly-2026-08-20，rustup 会自动下载并切换
+
+      - name: 取 PR 标题/正文/labels/分支
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+        run: |
+          set -euo pipefail
+          PR="${{ inputs.pr }}"
+          gh pr view "$PR" -R "${{ env.PRIVATE_REPO }}" \
+            --json title,body,labels,headRefName \
+            --jq '{title: .title, body: .body, labels: ([.labels[].name] | join(",")), branch: .headRefName}' \
+            > /tmp/pr.json
+          jq -r .body /tmp/pr.json > /tmp/pr-body.md
+          echo "title=$(jq -r .title /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+          echo "labels=$(jq -r .labels /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+          echo "branch=$(jq -r .branch /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+          echo ">>> PR $PR: $(jq -r .title /tmp/pr.json)"
+
+      - name: 跑 rust-specs github-pr 检查
+        id: check
+        env:
+          TITLE: ${{ steps.pr.outputs.title }}
+          LABELS: ${{ steps.pr.outputs.labels }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          set -euo pipefail
+          args=(check github-pr --title "$TITLE" --body-file /tmp/pr-body.md)
+          [ -n "$LABELS" ] && args+=(--labels "$LABELS")
+          [ -n "$BRANCH" ] && args+=(--branch "$BRANCH")
+          set +e
+          cargo xtask "${args[@]}"
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "result=success" >> "$GITHUB_OUTPUT" ;;
+            1) echo "result=failure" >> "$GITHUB_OUTPUT" ;;
+            *) echo "result=pending" >> "$GITHUB_OUTPUT" ;;  # gh/工具链问题 ≠ 代码问题
+          esac
+
+      - name: 回写 commit status `rust-specs`
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          TITLE: ${{ steps.pr.outputs.title }}
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.status_sha || inputs.sha }}"
+          if ! gh api "repos/${{ env.PRIVATE_REPO }}/commits/$TARGET" > /dev/null 2>&1; then
+            echo "target sha $TARGET no longer exists; skipping status write"
+            exit 0
+          fi
+          DESC="rust-specs github-pr: ${TITLE:0:110}"
+          STATE="${{ steps.check.outputs.result }}"
+          [ -z "$STATE" ] && STATE="failure"
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
+            -f state="$STATE" -f context="rust-specs" -f description="$DESC" \
+            > /dev/null
+          echo "status $STATE posted to $TARGET as context=rust-specs"
