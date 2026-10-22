@@ -953,6 +953,9 @@ jobs:
           set -euo pipefail
           rustup toolchain install nightly-2026-08-20 --profile minimal --component rustc-dev
           cargo +nightly-2026-08-20 install cargo-dylint --locked
+          # dylint-link 是独立 crate：编译 lint 库时 rustc 要用它当 linker，缺了就报
+          # "linker `dylint-link` not found"。版本与 cargo-dylint 对齐（6.2.x）。
+          cargo +nightly-2026-08-20 install dylint-link --locked
 
       - name: 跑 dylint（只扫改动成员）
         id: dylint
