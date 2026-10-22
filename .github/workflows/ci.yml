@@ -674,7 +674,8 @@ jobs:
           fetch-depth: 1
 
       - name: 装 Rust 工具链（rust-specs 固定 nightly）
-        uses: dtolnay/rust-toolchain@nightly-2026-08-20
+        uses: dtolnay/rust-toolchain@nightly
+        # rust-specs 仓根 rust-toolchain.toml 固定 nightly-2026-08-20，rustup 会自动下载并切换
 
       - name: 取 PR 标题/正文/labels/分支
         id: pr
