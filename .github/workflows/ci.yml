@@ -1011,7 +1011,7 @@ jobs:
           for pkg in "${PKGS[@]}"; do
             echo ">>> dylint -p $pkg"
             set +e
-            output="$(cargo +nightly-2026-08-20 dylint --no-deps --path "$RUST_SPECS" --pattern 'lints/*' -p "$pkg" 2>&1)"
+            output="$(cargo +nightly-2026-08-20 dylint --no-deps --path "$RUST_SPECS" --pattern '*' -p "$pkg" 2>&1)"
             code=$?
             set -e
             printf '%s\n' "$output" | tail -25
