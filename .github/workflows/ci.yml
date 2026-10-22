@@ -915,6 +915,14 @@ jobs:
         with:
           version: "v0.10.0"
 
+      # ferrite .cargo/config.toml 配了 clang + --ld-path=/usr/bin/mold；dylint-link
+      # 调 cc 链接时缺 mold 会报 unrecognized command-line option。与 lint-check 同包装。
+      - name: 装 mold
+        run: |
+          set -euo pipefail
+          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
       - name: 算改动涉及的工作区成员
         id: scope
         run: |
