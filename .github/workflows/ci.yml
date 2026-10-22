@@ -880,3 +880,127 @@ jobs:
             -f state="$STATE" -f context="rust-specs" -f description="$DESC" \
             > /dev/null
           echo "status $STATE posted to $TARGET as context=rust-specs"
+
+  # rust-specs 语法检查（合并门辅助）：只对 PR diff 涉及的工作区成员跑 dylint。
+  # agent 开发期用 clippy 自查；这里用 rust-specs 的项目语法规则兜底，且只扫改动到的
+  # crate，不做全仓扫描。PR diff 没有 Rust 改动时（docs-only 等）直接 success，不装工具链。
+  rust-specs-dylint:
+    if: inputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: 检出 rust-specs（公开仓）
+        uses: actions/checkout@v4
+        with:
+          repository: hathawayANdRX105/rust-specs
+          ref: main
+          fetch-depth: 1
+          path: rust-specs
+
+      - name: 装 Rust 工具链（stable，算改动面用）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 算改动涉及的工作区成员
+        id: scope
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
+          git diff --name-only "origin/${{ inputs.base }}"...HEAD > /tmp/changed.txt || true
+          if [ ! -s /tmp/changed.txt ]; then
+            echo ">>> 无改动文件"
+            echo "packages=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cargo metadata --no-deps --format-version 1 > /tmp/meta.json
+          export CHANGED_FILE=/tmp/changed.txt
+          python3 - <<'PY'
+          import json, os
+          meta = json.load(open('/tmp/meta.json'))
+          changed = [l.strip() for l in open(os.environ['CHANGED_FILE']) if l.strip()]
+          touched = set()
+          for p in meta['packages']:
+              root = os.path.dirname(p['manifest_path'])
+              for f in changed:
+                  try:
+                      if os.path.commonpath([os.path.abspath(f), root]) == root:
+                          touched.add(p['name'])
+                          break
+                  except ValueError:
+                      continue
+          print('packages=' + ','.join(sorted(touched)))
+          PY
+
+      - name: 装 nightly + rustc-dev + cargo-dylint
+        if: steps.scope.outputs.packages != ''
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-08-20 --profile minimal --component rustc-dev
+          cargo +nightly-2026-08-20 install cargo-dylint --locked
+
+      - name: 跑 dylint（只扫改动成员）
+        id: dylint
+        if: steps.scope.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.scope.outputs.packages }}
+        run: |
+          set -euo pipefail
+          RUST_SPECS="$GITHUB_WORKSPACE/rust-specs"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/dylint-target"
+          # rust-specs 五条规则都是 Warn 级别，dylint 发现命中时本身仍返回 0；
+          # 门禁必须从输出里识别命中，命中即判失败。另把 dylint 自身崩溃（编译/工具链错误）也判失败。
+          FINDINGS_RE='unwrap is banned|branch ends with return/break/continue|consecutive same-shape push loops|expect.*is used in a function that does not return|control flow nesting exceeds 4 levels'
+          failed=0
+          IFS=',' read -ra PKGS <<< "$PACKAGES"
+          for pkg in "${PKGS[@]}"; do
+            echo ">>> dylint -p $pkg"
+            set +e
+            output="$(cargo +nightly-2026-08-20 dylint --path "$RUST_SPECS" --pattern 'lints/*' -p "$pkg" 2>&1)"
+            code=$?
+            set -e
+            printf '%s\n' "$output" | tail -25
+            if printf '%s\n' "$output" | grep -E "$FINDINGS_RE" > /dev/null; then
+              echo ">>> rust-specs findings in $pkg"
+              failed=1
+            elif [ "$code" != "0" ]; then
+              echo ">>> dylint crashed for $pkg (exit $code)"
+              failed=1
+            fi
+          done
+          if [ "$failed" = "1" ]; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 回写 commit status `rust-specs-dylint`
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          SCOPE: ${{ steps.scope.outputs.packages }}
+          RESULT: ${{ steps.dylint.outputs.result }}
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.status_sha || inputs.sha }}"
+          if ! gh api "repos/${{ env.PRIVATE_REPO }}/commits/$TARGET" > /dev/null 2>&1; then
+            echo "target sha $TARGET no longer exists; skipping status write"
+            exit 0
+          fi
+          if [ -z "$SCOPE" ]; then
+            STATE="success"
+            DESC="rust-specs-dylint: no rust changes in PR diff"
+          else
+            STATE="${RESULT:-failure}"
+            DESC="rust-specs-dylint: ${SCOPE:0:90}"
+          fi
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
+            -f state="$STATE" -f context="rust-specs-dylint" -f description="$DESC" \
+            > /dev/null
+          echo "status $STATE posted to $TARGET as context=rust-specs-dylint"
