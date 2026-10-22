@@ -905,6 +905,16 @@ jobs:
           fetch-depth: 1
           path: rust-specs
 
+      # dylint 构建 lint 库时会在 rust-specs/lints/<name> 里跑 cargo。若 rust-specs
+      # 位于 ferrite 工作区内，cargo 会向上继承 ferrite 的 .cargo/config.toml
+      # （linker=clang + --ld-path=/usr/bin/mold），而 dylint-link 最终调 cc（gcc）
+      # 会报 unrecognized command-line option '--ld-path=/usr/bin/mold'。
+      # 移到工作区外，与本地（rust-specs 与 ferrite 平级）保持一致。
+      - name: 把 rust-specs 移出 ferrite 工作区
+        run: |
+          set -euo pipefail
+          mv "$GITHUB_WORKSPACE/rust-specs" "$RUNNER_TEMP/rust-specs"
+
       - name: 装 Rust 工具链（stable，算改动面用）
         uses: dtolnay/rust-toolchain@stable
 
@@ -972,7 +982,7 @@ jobs:
           PACKAGES: ${{ steps.scope.outputs.packages }}
         run: |
           set -euo pipefail
-          RUST_SPECS="$GITHUB_WORKSPACE/rust-specs"
+          RUST_SPECS="$RUNNER_TEMP/rust-specs"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/dylint-target"
           # rust-specs 五条规则都是 Warn 级别，dylint 发现命中时本身仍返回 0；
           # 门禁必须从输出里识别命中，命中即判失败。另把 dylint 自身崩溃（编译/工具链错误）也判失败。
