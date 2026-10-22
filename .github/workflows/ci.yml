@@ -954,12 +954,23 @@ jobs:
           set -euo pipefail
           RUST_SPECS="$GITHUB_WORKSPACE/rust-specs"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/dylint-target"
+          # rust-specs 五条规则都是 Warn 级别，dylint 发现命中时本身仍返回 0；
+          # 门禁必须从输出里识别命中，命中即判失败。另把 dylint 自身崩溃（编译/工具链错误）也判失败。
+          FINDINGS_RE='unwrap is banned|branch ends with return/break/continue|consecutive same-shape push loops|expect.*is used in a function that does not return|control flow nesting exceeds 4 levels'
           failed=0
           IFS=',' read -ra PKGS <<< "$PACKAGES"
           for pkg in "${PKGS[@]}"; do
             echo ">>> dylint -p $pkg"
-            if ! cargo +nightly-2026-08-20 dylint --path "$RUST_SPECS" --pattern 'lints/*' -p "$pkg"; then
-              echo ">>> dylint failed for $pkg"
+            set +e
+            output="$(cargo +nightly-2026-08-20 dylint --path "$RUST_SPECS" --pattern 'lints/*' -p "$pkg" 2>&1)"
+            code=$?
+            set -e
+            printf '%s\n' "$output" | tail -25
+            if printf '%s\n' "$output" | grep -E "$FINDINGS_RE" > /dev/null; then
+              echo ">>> rust-specs findings in $pkg"
+              failed=1
+            elif [ "$code" != "0" ]; then
+              echo ">>> dylint crashed for $pkg (exit $code)"
               failed=1
             fi
           done
