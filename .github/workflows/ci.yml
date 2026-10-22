@@ -915,6 +915,25 @@ jobs:
           set -euo pipefail
           mv "$GITHUB_WORKSPACE/rust-specs" "$RUNNER_TEMP/rust-specs"
 
+      # 只加载本仓已采纳的规则。rust-specs 里还有别的会话/实验中的规则
+      # （dioxus-* 等），它们的 lint 可能 panic 或产生无关告警，不能拖垮本门禁。
+      - name: 准备门禁规则（只复制已采纳的 6 条）
+        run: |
+          set -euo pipefail
+          GATED="$RUNNER_TEMP/gated-lints"
+          mkdir -p "$GATED"
+          for name in \
+            ban-unwrap \
+            chainable-single-statement \
+            consecutive-same-shape-loops \
+            early-return-needs-no-else \
+            expect-in-non-result \
+            max-nesting-depth
+          do
+            cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
+          done
+          ls -1 "$GATED"
+
       - name: 装 Rust 工具链（stable，算改动面用）
         uses: dtolnay/rust-toolchain@stable
 
@@ -982,7 +1001,7 @@ jobs:
           PACKAGES: ${{ steps.scope.outputs.packages }}
         run: |
           set -euo pipefail
-          RUST_SPECS="$RUNNER_TEMP/rust-specs"
+          RUST_SPECS="$RUNNER_TEMP/gated-lints"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/dylint-target"
           # rust-specs 五条规则都是 Warn 级别，dylint 发现命中时本身仍返回 0；
           # 门禁必须从输出里识别命中，命中即判失败。另把 dylint 自身崩溃（编译/工具链错误）也判失败。
