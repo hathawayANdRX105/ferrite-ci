@@ -908,6 +908,13 @@ jobs:
       - name: 装 Rust 工具链（stable，算改动面用）
         uses: dtolnay/rust-toolchain@stable
 
+      # ferrite 仓 .cargo/config.toml 配了 rustc-wrapper = sccache；不装的话
+      # cargo 调 rustc 直接失败（could not execute process sccache）。
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
       - name: 算改动涉及的工作区成员
         id: scope
         run: |
