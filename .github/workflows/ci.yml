@@ -935,7 +935,9 @@ jobs:
                           break
                   except ValueError:
                       continue
-          print('packages=' + ','.join(sorted(touched)))
+          # GitHub Actions 输出变量必须写进 $GITHUB_OUTPUT 文件，不能只 print 到 stdout
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('packages=' + ','.join(sorted(touched)) + '\n')
           PY
 
       - name: 装 nightly + rustc-dev + cargo-dylint
