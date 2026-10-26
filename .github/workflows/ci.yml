@@ -828,7 +828,7 @@ jobs:
 
   # 聚合两关卡结果，写 commit status `shell-ci` 回主仓：落点 = status_sha（空则回退 sha）。
   report:
-    needs: [lint-check, test, app-shell-check]
+    needs: [lint-check, test, app-shell-check, rust-specs-dylint]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -868,8 +868,10 @@ jobs:
           # cancelled ≠ failure：被并发组取消不代表代码有问题，回写 pending 表示等待重派/手动补派，不能折成红（GH commit status 接受 pending）。
           # app-shell-check 无 job 级 if（跳过在 step 内做 notice exit 0），不会被 skipped；
           # cancelled 与另两关同口径折成 pending，让重派后能重新回写。
-          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
-          DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, app-shell {4}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result) }}"
+          # rust-specs-dylint 只在 PR 跑（job 级 if: inputs.pr != ''），全量跑时为 skipped；
+          # skipped 不算失败，与「无 Rust 改动」同口径。
+          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && (needs.rust-specs-dylint.result == 'success' || needs.rust-specs-dylint.result == 'skipped') && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
+          DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, app-shell {4}, rust-specs {5}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result, needs.rust-specs-dylint.result) }}"
           # 快关与全量写**不同的 context**：`shell-ci` 是合并门（主仓 .agent/rules/testing-ci.md
           # 只认这个名字），`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
           # 同一个 head commit 上两条 run 抢同一个状态槽、谁后跑完谁覆盖谁，全量红会把合并门
@@ -1001,20 +1003,61 @@ jobs:
           set -euo pipefail
           mv "$GITHUB_WORKSPACE/rust-specs" "$RUNNER_TEMP/rust-specs"
 
-      # 只加载本仓已采纳的规则。rust-specs 里还有别的会话/实验中的规则
-      # （dioxus-* 等），它们的 lint 可能 panic 或产生无关告警，不能拖垮本门禁。
-      - name: 准备门禁规则（只复制已采纳的 6 条）
+      # 准备门禁规则：复制 rust-specs 的全部 lint（通用语法 9 条 + dioxus 11 条）。
+      # 早先这里只复制 6 条，且 dylint 命令行缺少 --all 与具体 lint 名，
+      # late lint 从未被真正启用——门禁一直空转。现在复制全量并按 lint ID 判定。
+      - name: 准备门禁规则（复制全部 lint）
         run: |
           set -euo pipefail
           GATED="$RUNNER_TEMP/gated-lints"
           mkdir -p "$GATED"
+          # 清单里的每条 lint 都必须在 rust-specs 的 main 上存在。缺一条就显式失败，
+          # 而不是让 cp 抛出一个看不出原因的错误：新增 lint 的 PR 必须先合并到
+          # rust-specs，本 job 才认得它。
+          missing=0
+          for name in ban-unwrap chainable-single-statement consecutive-same-shape-loops \
+            early-return-needs-no-else expect-in-non-result let-if-else max-nesting-depth \
+            pick-outside-rsx redundant-branch-closures dioxus-effect-self-loop \
+            dioxus-globalsignal-discipline dioxus-layer-direction dioxus-ownership-imports \
+            dioxus-props-contract dioxus-rsx-avoid-control-flow dioxus-rsx-cjk-text \
+            dioxus-rsx-list-key dioxus-rsx-nesting dioxus-rsx-no-if-else \
+            dioxus-rsx-one-per-component
+          do
+            if [ ! -d "$RUNNER_TEMP/rust-specs/lints/$name" ]; then
+              echo "::error title=rust-specs lint 缺失::$name 不在 rust-specs main 上；先合并对应的 rust-specs PR"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 1
+          fi
+          # 通用语法 lint：适用于所有 crate。
           for name in \
             ban-unwrap \
             chainable-single-statement \
             consecutive-same-shape-loops \
             early-return-needs-no-else \
             expect-in-non-result \
-            max-nesting-depth
+            let-if-else \
+            max-nesting-depth \
+            pick-outside-rsx \
+            redundant-branch-closures
+          do
+            cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
+          done
+          # dioxus lint：自带 crate 名作用域判断（ui_* 与 web），对后端 crate 不产生 finding。
+          for name in \
+            dioxus-effect-self-loop \
+            dioxus-globalsignal-discipline \
+            dioxus-layer-direction \
+            dioxus-ownership-imports \
+            dioxus-props-contract \
+            dioxus-rsx-avoid-control-flow \
+            dioxus-rsx-cjk-text \
+            dioxus-rsx-list-key \
+            dioxus-rsx-nesting \
+            dioxus-rsx-no-if-else \
+            dioxus-rsx-one-per-component
           do
             cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
           done
@@ -1092,25 +1135,91 @@ jobs:
           set -euo pipefail
           RUST_SPECS="$RUNNER_TEMP/gated-lints"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/dylint-target"
-          # rust-specs 五条规则都是 Warn 级别，dylint 发现命中时本身仍返回 0；
-          # 门禁必须从输出里识别命中，命中即判失败。另把 dylint 自身崩溃（编译/工具链错误）也判失败。
-          FINDINGS_RE='unwrap is banned|branch ends with return/break/continue|consecutive same-shape push loops|expect.*is used in a function that does not return|control flow nesting exceeds 4 levels'
+          # dylint 的两条硬要求，缺一则 lint 静默不触发：
+          #   1) `--all`：加载 --pattern 匹配到的全部 lint 库；
+          #   2) `DYLINT_RUSTFLAGS` 里逐个点名 lint：--all 只加载库，不等于启用，
+          #      不点名时 dylint 不跑这些 late lint，输出里没有 compiler-message。
+          # 判定按 lint ID（JSON 诊断的 code 字段），不匹配报错文案——
+          # 文案一改正则就失效，门禁会静默变绿。
+          #
+          # 分级：通用语法 8 条全部阻断；dioxus 11 条中只有已达成共识的
+          # no-if-else / layer-direction / globalsignal-discipline 阻断，其余
+          # （rsx-nesting 等架构级规则）只报告不阻断——它们的存量规模大
+          # （rsx-nesting 在 ui-components 单 crate 就有 134 条），
+          # 一次性阻断会让所有 UI 改动都推不动。
+          LINT_FLAGS=""
+          LINT_ALLOW=""
+          BLOCKING_LINTS="ban_unwrap,chainable_single_statement,consecutive_same_shape_loops,early_return_needs_no_else,expect_in_non_result,let_if_else,max_nesting_depth,pick_outside_rsx,redundant_branch_closures,dioxus_rsx_no_if_else,dioxus_layer_direction,dioxus_globalsignal_discipline"
+          for name in \
+            ban_unwrap \
+            chainable_single_statement \
+            consecutive_same_shape_loops \
+            early_return_needs_no_else \
+            expect_in_non_result \
+            let_if_else \
+            max_nesting_depth \
+            pick_outside_rsx \
+            redundant_branch_closures \
+            dioxus_effect_self_loop \
+            dioxus_globalsignal_discipline \
+            dioxus_layer_direction \
+            dioxus_ownership_imports \
+            dioxus_props_contract \
+            dioxus_rsx_avoid_control_flow \
+            dioxus_rsx_cjk_text \
+            dioxus_rsx_list_key \
+            dioxus_rsx_nesting \
+            dioxus_rsx_no_if_else \
+            dioxus_rsx_one_per_component
+          do
+            LINT_FLAGS="$LINT_FLAGS -D $name"
+            LINT_ALLOW="$LINT_ALLOW,$name"
+          done
+          LINT_ALLOW="${LINT_ALLOW#,}"
           failed=0
           IFS=',' read -ra PKGS <<< "$PACKAGES"
           for pkg in "${PKGS[@]}"; do
             echo ">>> dylint -p $pkg"
+            rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
             set +e
-            output="$(cargo +nightly-2026-08-20 dylint --no-deps --path "$RUST_SPECS" --pattern '*' -p "$pkg" 2>&1)"
+            DYLINT_RUSTFLAGS="$LINT_FLAGS" cargo +nightly-2026-08-20 dylint \
+              --no-deps --path "$RUST_SPECS" --pattern '*' --all \
+              -p "$pkg" -- --message-format=json \
+              > /tmp/dylint-out-$$.json 2> /tmp/dylint-$$.err
             code=$?
             set -e
-            printf '%s\n' "$output" | tail -25
-            if printf '%s\n' "$output" | grep -E "$FINDINGS_RE" > /dev/null; then
-              echo ">>> rust-specs findings in $pkg"
-              failed=1
-            elif [ "$code" != "0" ]; then
+            # 诊断读 stdout 的 JSON（compiler-message），编译日志在 stderr。
+            # 只收 rust-specs 自己声明的 lint ID：dylint 的 lint 库只在被检查的
+            # crate 自身编译时注册，对依赖 crate 不生效，于是依赖方会收到
+            # "unknown lint"（E0602）等 rustc 自身诊断——那些不是规范 finding。
+            findings="$(jq -r --arg allow "$LINT_ALLOW" '
+              select(.reason == "compiler-message")
+              | select(.message.code != null)
+              | select((.message.spans | length) > 0)
+              | select((.message.code.code | ascii_downcase) as $c
+                       | ($allow | split(",") | index($c)) != null)
+              | [(.message.code.code | ascii_downcase),
+                 (.message.spans[0].file_name // ""),
+                 ((.message.spans[0].line_start // 0) | tostring),
+                 (.message.message // "")]
+              | @tsv' /tmp/dylint-out-$$.json 2>/dev/null || true)"
+            if [ -n "$findings" ]; then
+              while IFS=$'\t' read -r id path line msg; do
+                [ -n "$id" ] || continue
+                if printf '%s' "$BLOCKING_LINTS" | tr ',' '\n' | grep -qx "$id"; then
+                  echo ">>> [BLOCK $id] $path:$line  $msg"
+                  failed=1
+                else
+                  echo ">>> [report $id] $path:$line  $msg"
+                fi
+              done <<< "$findings"
+            fi
+            if [ "$code" != "0" ] && [ -z "$findings" ]; then
               echo ">>> dylint crashed for $pkg (exit $code)"
+              tail -20 /tmp/dylint-$$.err
               failed=1
             fi
+            rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
           done
           if [ "$failed" = "1" ]; then
             echo "result=failure" >> "$GITHUB_OUTPUT"
