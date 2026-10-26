@@ -361,7 +361,7 @@ jobs:
       # probe 因此在 CI 里从未执行（实证：全量 run 39155097666 日志里 xtask 零命中，
       # pages_own_ui_probe 与既有的 dep_edge_bin_layer 两条 probe 都被漏掉）。
       # 这里按上面的 `xtask` 开关补跑：改动碰了 xtask/ 才付 check-* 的编译。
-      # 首次编译含 canon 的 check-* git 依赖，故给 20 分钟（之后吃缓存）。
+      # First compile pulls the check-* git dependencies (now rust-specs); 20 minutes covers it (later runs hit the cache).
       - name: xtask 规则 crate 测试（按 diff 门控）
         if: steps.scope.outputs.xtask == 'true'
         timeout-minutes: 20
@@ -369,14 +369,16 @@ jobs:
         # 根 Cargo.toml 的 [profile] 对它不生效，加了只会报 profile 不存在。
         run: cargo test --manifest-path xtask/Cargo.toml
 
-      # canon 的 bash 规则 CD-06（主仓 .githooks/spec/code/code_bash.yaml，shellcheck --format=gcc）
-      # 在工具缺失的机器上按设计降级为 WARN 跳过，于是 bash 脚本可能长期没人检查
-      # （真实漏网：主仓 benches/scripts/bench_gateway.sh 少一个闭合引号，`bash -n` 都过不去）。
-      # 这里在 CI 里按同一口径补跑；主仓等价入口是 `just lint-shell`。
-      # 跳过符号链接——shellcheck 会顺链把同一个文件报两遍（benches/scripts/deploy_bench_key.sh 是软链）。
-      # 位置放在 cargo fmt / clippy 之后：步骤一红，同 job 后面的步骤全被 skipped，
-      # 放前面会让一条 shell 发现掩掉所有 Rust 信号（实测 run 38155447476 就是这样）。
-      - name: shell 闸门（shellcheck，与 canon CD-06 同口径）
+      # Main repo's bash rules (rust-specs shellcheck gate; see `just lint-shell`) would
+      # degrade to WARN skip on machines without shellcheck, so bash scripts could go
+      # unchecked for a long time (real miss: benches/scripts/bench_gateway.sh was
+      # missing one closing quote and even `bash -n` would not have caught it).
+      # CI runs the same gate here; the main repo's equivalent entry is `just lint-shell`.
+      # Skip symlinks — shellcheck would report the same file twice through the link
+      # (benches/scripts/deploy_bench_key.sh is a symlink).
+      # Position after cargo fmt / clippy: a red step skips all later steps in the job;
+      # placing it first would let one shell finding mask all Rust signals (seen in run 38155447476).
+      - name: Shell gate (shellcheck, same scope as `just lint-shell`)
         run: |
           set -euo pipefail
           # bin/ is a Rust tree in the W5 generation; keep shell files only.
@@ -385,8 +387,8 @@ jobs:
           for f in "${files[@]}"; do
             if [ -f "$f" ] && [ ! -L "$f" ]; then real+=("$f"); fi
           done
-          # --severity=style：canon CD-06 不传 severity（默认 style = 四级全开），这里写死防以后默认变化；
-          # 与主仓 `just lint-shell` 同参数。注意本机退回 `bun x shellcheck` 时不出 note 级，两边不完全等价。
+          # --severity=style: the main repo's gate does not pass severity (default style = all four levels); pin it here so a future default change cannot loosen it;
+          # Same parameters as main repo's `just lint-shell`. Note: the local `bun x shellcheck` fallback does not emit note level, so results are not fully equivalent.
           shellcheck --severity=style --format=gcc "${real[@]}"
 
       # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-prompts 的
@@ -1142,3 +1144,71 @@ jobs:
             -f state="$STATE" -f context="rust-specs-dylint" -f description="$DESC" \
             > /dev/null
           echo "status $STATE posted to $TARGET as context=rust-specs-dylint"
+  spec-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout private source (PAT)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+      - name: Determine check scope (PR = changed 3-point diff; main/full = changed 2-point diff HEAD^ HEAD)
+        id: scope
+        run: |
+          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
+            echo ">>> full run (main push / full=true): spec-check 2-point diff HEAD^ HEAD, only this merge's changes"
+            echo "base=HEAD^" >> "$GITHUB_OUTPUT"
+          else
+            echo ">>> PR fast gate: spec-check 3-point diff origin/${{ inputs.base }}...HEAD"
+            echo "base=origin/${{ inputs.base }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install just (casey/just release)
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/casey/just/releases/latest --jq .tag_name)
+          gh release download "$tag" -R casey/just \
+            -p "just-*x86_64-unknown-linux-musl.tar.gz" -O - | tar xzf - just
+          sudo install -m755 just /usr/local/bin/just
+          just --version
+      - name: Install Rust toolchain (cargo xtask structure compiles xtask/check + rust-specs/checks)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout rust-specs (public repo, sibling dir + RUST_SPECS_DIR)
+        uses: actions/checkout@v4
+        with:
+          repository: hathawayANdRX105/rust-specs
+          ref: main
+          path: rust-specs
+      - name: Run spec-check (${{ steps.scope.outputs.base }} scope; WARN blocks too)
+        id: check
+        env:
+          RUST_SPECS_DIR: ${{ github.workspace }}/rust-specs
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.scope.outputs.base }}"
+          echo ">>> spec-check scope: $BASE"
+          out="$(just spec-check --base "$BASE" 2>&1)" || true
+          printf '%s\n' "$out"
+          if ! printf '%s\n' "$out" | grep -q '^PASS: 0 findings, 0 failures$'; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+            echo "spec-check found issues (WARN counts as failure); fix before merging."
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+            echo "spec-check: no findings."
+          fi
+      - name: Post commit status `spec-check`
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          TARGET: ${{ inputs.status_sha || inputs.sha }}
+          RESULT: ${{ steps.check.outputs.result }}
+        run: |
+          set -euo pipefail
+          STATE="${RESULT:-failure}"
+          [ "$STATE" = "success" ] && DESC="spec-check: no findings" || DESC="spec-check: WARN/FAIL findings must be fixed"
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
+            -f state="$STATE" -f context="spec-check" -f description="$DESC" \
+            > /dev/null
+          echo "status $STATE posted to $TARGET as context=spec-check"
