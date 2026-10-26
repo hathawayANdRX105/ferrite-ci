@@ -561,6 +561,92 @@ jobs:
           done
           echo ">>> 端上壳编译守卫通过"
 
+  # 移动目标 graph 守卫：coding-harness-graph 是纯 Rust（petgraph，无 C 依赖 / build.rs），
+  # cargo check（不链接）证明它在 aarch64-linux-android / aarch64-apple-ios 两个移动目标上
+  # 类型检查通过——回答「移动壳能不能带上 graph」。两个目标都在 ubuntu-latest 跑：纯 Rust
+  # check 不链接，不需要 macOS / Android NDK，rustup target add 即可。原私有仓
+  # mobile-targets.yml 把 iOS 放 macos-latest 付了私有仓 10× 分钟数（私有仓 Actions 受限），
+  # 迁入公开壳仓后 runner 全免费——按维护者口径用 ubuntu，免去 macOS 排队。
+  # 与 rust-specs-check 同构：独立 job（不进 report 的 needs），回写自己的 `mobile-targets`
+  # commit status（PR 头提交可见），不进 shell-ci 合并门——graph→session 合并在途，先观测，
+  # 合并门语义零变更。graph crate 缺席（合并在途）按 success-skip，不静默绿也不红。
+  # 复用现有 ci-dispatch 派发，无新增派发链，零私有分钟数。
+  mobile-targets:
+    if: inputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+          fetch-depth: 0
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 装移动目标
+        run: rustup target add aarch64-linux-android aarch64-apple-ios
+
+      # rustc-wrapper=sccache（仓根 .cargo/config.toml 钉）：不装则每个 rustc 调用
+      # 以 "sccache not found" 失败。check 不链接，故无需 mold/clang（同原私有仓 yml）。
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
+
+      - name: 移动目标 graph cargo check
+        id: check
+        run: |
+          set -euo pipefail
+          # 包名世代自适应（graph → session 合并在途）：graph 不在树上就 success-skip。
+          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '[.packages[].name] | map(select(. == "coding-harness-graph")) | first // empty')
+          if [ -z "$PKG" ]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+            echo "desc=graph crate absent (graph->session mid-state); mobile-targets skipped" >> "$GITHUB_OUTPUT"
+            echo ">>> 树上没有 coding-harness-graph；移动目标守卫跳过"
+            exit 0
+          fi
+          set +e
+          fail=0
+          for tgt in aarch64-linux-android aarch64-apple-ios; do
+            echo ">>> cargo check -p ${PKG} --target ${tgt}"
+            cargo check -p "$PKG" --target "$tgt"
+            rc=$?
+            [ "$rc" -ne 0 ] && fail=1
+          done
+          set -e
+          if [ "$fail" -eq 0 ]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+            echo "desc=mobile-targets: ${PKG} ok for aarch64-linux-android + aarch64-apple-ios" >> "$GITHUB_OUTPUT"
+            echo ">>> 移动目标 graph 守卫通过"
+          else
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+            echo "desc=mobile-targets: ${PKG} failed for >=1 mobile target" >> "$GITHUB_OUTPUT"
+            echo ">>> 移动目标 graph 守卫失败"
+          fi
+
+      - name: 回写 commit status `mobile-targets`
+        env:
+          GH_TOKEN: ${{ secrets.FERRITE_PAT }}
+          URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.status_sha || inputs.sha }}"
+          if ! gh api "repos/${{ env.PRIVATE_REPO }}/commits/$TARGET" > /dev/null 2>&1; then
+            echo "target sha $TARGET no longer exists; skipping status write"
+            exit 0
+          fi
+          STATE="${{ steps.check.outputs.result }}"
+          [ -z "$STATE" ] && STATE="failure"
+          DESC="${{ steps.check.outputs.desc }}"
+          gh api "repos/${{ env.PRIVATE_REPO }}/statuses/$TARGET" \
+            -f state="$STATE" -f context="mobile-targets" -f description="$DESC" -f target_url="$URL" \
+            > /dev/null
+          echo "status $STATE posted to $TARGET as context=mobile-targets"
+
   # 测试连接临时 PostgreSQL；db_bootstrap 在测试启动时应用迁移。
   test:
     runs-on: ubuntu-latest
