@@ -895,8 +895,8 @@ jobs:
           echo "status $STATE posted to $TARGET as context=$CONTEXT"
 
   # rust-specs 规范检查（合并门辅助）：PR 快关额外回写 `rust-specs` commit status。
-  # 用公开 rust-specs 仓的 xtask 检查 PR 标题/正文是否符合 GitHub 规范（替代 canon 的
-  # PR 格式拦截）；回写落点 = status_sha（PR 头提交），与 shell-ci 同对象，gh pr checks 可见。
+  # 用公开 rust-specs 仓的 xtask 检查 PR 标题/正文是否符合 GitHub 规范（PR 格式门禁已迁到 rust-specs）；
+  # 回写落点 = status_sha（PR 头提交），与 shell-ci 同对象，gh pr checks 可见。
   # 只对 PR 跑：main push / full 是合并后的兜底，不涉及 PR 创建格式门禁。
   rust-specs-check:
     if: inputs.pr != ''
