@@ -1275,6 +1275,8 @@ jobs:
             echo "base=origin/${{ inputs.base }}" >> "$GITHUB_OUTPUT"
           fi
       - name: Install just (casey/just release)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag=$(gh api repos/casey/just/releases/latest --jq .tag_name)
