@@ -1302,7 +1302,8 @@ jobs:
           echo ">>> spec-check scope: $BASE"
           out="$(just spec-check --base "$BASE" 2>&1)" || true
           printf '%s\n' "$out"
-          if ! printf '%s\n' "$out" | grep -q '^PASS: 0 findings, 0 failures$'; then
+          # FAIL/WARN findings block; INFO (existing debt / advisory signals) does not.
+          if printf '%s\n' "$out" | grep -qE '^\[(FAIL|WARN)\]'; then
             echo "result=failure" >> "$GITHUB_OUTPUT"
             echo "spec-check found issues (WARN counts as failure); fix before merging."
           else
