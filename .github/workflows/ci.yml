@@ -391,24 +391,24 @@ jobs:
           # Same parameters as main repo's `just lint-shell`. Note: the local `bun x shellcheck` fallback does not emit note level, so results are not fully equivalent.
           shellcheck --severity=style --format=gcc "${real[@]}"
 
-      # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-prompts 的
+      # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-loop 的
       # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册。
       #
       # 门控理由的演进：早先它**无条件跑死**，依据是「testless 的 seed 只来自 Rust 文件，
       # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main」。那条对 testless 成立，
       # 但路径检查直接看得见 .md —— 改由 ci-scope-flags.sh 的 `rules` 开关门控，
-      # 只在本轮 diff 真碰 `.agent/rules/**` 或 `crates/harness-agent-prompts/**` 时跑。
+      # 只在本轮 diff 真碰 `.agent/rules/**` 或 `crates/harness-agent-loop/src/prompts/**` 时跑。
       # 安全边界与先前一致：`rules` 的保守值是 true（脚本缺席 / 拿不到 base 一律跑），
       # 且它的触发面正是这条守卫唯一会红的两处。
       #
       # 位置与上面的 shell 闸门同理放在 fmt/clippy 之后：步骤一红，后面的步骤全被 skipped。
-      # 它是本 job 首次 codegen + 链接 harness-agent-prompts 的 dev-dep tools（ast-grep + tree-sitter
+      # 它是本 job 首次 codegen + 链接 harness-agent-loop 的 dev-dep tools（ast-grep + tree-sitter
       # C 语法 + host 侧 db/turso），构建量级高于 db 守卫，故给 15 分钟（同 ui-kit 契约测试）。
       # 实测代价：run 39212811029 里这一步 102s，而多数 PR 的 diff 碰不到它的触发面。
       - name: 规范文档工具名守卫
         if: steps.flags.outputs.rules == 'true'
         timeout-minutes: 15
-        run: cargo test -p harness-agent-prompts --test tool_selection_tests --profile ci
+        run: cargo test -p harness-agent-loop --test tool_selection_tests --profile ci
 
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
