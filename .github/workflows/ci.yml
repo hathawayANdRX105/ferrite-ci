@@ -1286,6 +1286,12 @@ jobs:
           just --version
       - name: Install Rust toolchain (cargo xtask structure compiles xtask/check + rust-specs/checks)
         uses: dtolnay/rust-toolchain@stable
+      # ferrite .cargo/config.toml sets rustc-wrapper=sccache; without it
+      # `just spec-check` fails to invoke the compiler during xtask build.
+      - name: 装 sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: "v0.10.0"
       - name: Checkout rust-specs (public repo, sibling dir + RUST_SPECS_DIR)
         uses: actions/checkout@v4
         with:
