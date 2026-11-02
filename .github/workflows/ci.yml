@@ -201,15 +201,24 @@ jobs:
 
       # 样式类守卫（check-style-classes.mjs）+ 双入口 CSS 构建在 CI 硬拦：
       # 未登记页面类 / kit 配方漂移在这里红，不等浏览器冒烟。
-      # Bin-layer compat: web entry points move from apps/ to bin/ in mono W5;
-      # resolve either generation so both trees pass this step.
+      # The shared workflow checks both main's current layout and the product-entry
+      # cutover branch; every entry present in that source generation must build.
       - name: web 样式守卫 + CSS 构建
         if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
-          web_dir=$([ -d bin/web ] && echo bin/web || echo apps/web)
-          kit_dir=$([ -d bin/kit-demo ] && echo bin/kit-demo || echo apps/kit-demo)
-          (cd "$web_dir" && bun install --frozen-lockfile && bun run css)
+          if [ -d apps/server/web ]; then
+            web_dirs="apps/server/web apps/coder-desktop/web apps/coder-mobile/web dev/web"
+            kit_dir="dev/kit-demo"
+          else
+            web_dirs="bin/web"
+            kit_dir="bin/kit-demo"
+          fi
+          for d in $web_dirs; do
+            if [ ! -d "$d" ]; then echo "missing web entry dir: $d" >&2; exit 1; fi
+            (cd "$d" && bun install --frozen-lockfile && bun run css)
+          done
+          if [ ! -d "$kit_dir" ]; then echo "missing kit-demo dir: $kit_dir" >&2; exit 1; fi
           (cd "$kit_dir" && bun install --frozen-lockfile && bun run css)
 
       # ui-components 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
@@ -543,9 +552,21 @@ jobs:
             sccache-appshell-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
             sccache-test-${{ runner.os }}-v0.10.0-
+      - name: 装 Bun（web 样式/WASM 构建链）
+        if: steps.scope.outputs.mode != 'docs-only'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 装 wasm32 目标
+        if: steps.scope.outputs.mode != 'docs-only'
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: 装 Dioxus CLI
+        if: steps.scope.outputs.mode != 'docs-only'
+        run: cargo install dioxus-cli --locked --version 0.7.10
 
       - name: 取 base 分支（壳编译判定用）
-        if: inputs.pr != ''
         run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
 
       - name: 端上壳 cargo check（diff 门禁）
@@ -571,14 +592,29 @@ jobs:
             exit 0
           fi
           printf '%s\n' "$files" | sed 's/^/  壳变更: /'
-          shell_root=$([ -d platforms ] && echo platforms || echo apps)
-          for shell in desktop mobile; do
+          if [ -d apps/coder-desktop/src-tauri ]; then
+            shell_root="apps"
+            shells="coder-desktop coder-mobile"
+          else
+            shell_root="platforms"
+            shells="desktop mobile"
+          fi
+          for shell in $shells; do
             dir="${shell_root}/${shell}/src-tauri"
             if [ ! -d "$dir" ]; then
-              echo ">>> ${dir} 不存在（壳布局变动），跳过 ${shell}"
-              continue
+              echo "missing native shell dir: $dir" >&2
+              exit 1
             fi
-            echo ">>> cargo check ${shell}（${dir}）"
+            if [ "$shell_root" = "apps" ]; then
+              web_dir="apps/${shell}/web"
+              if [ ! -d "$web_dir" ]; then
+                echo "missing web entry dir: $web_dir" >&2
+                exit 1
+              fi
+              echo ">>> building WASM bundle for ${shell} (${web_dir})"
+              (cd "$web_dir" && bun install --frozen-lockfile && bun run css && RUSTC_WRAPPER='' dx build --release)
+            fi
+            echo ">>> cargo check ${shell} (${dir})"
             (cd "$dir" && cargo check)
           done
           echo ">>> 端上壳编译守卫通过"

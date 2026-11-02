@@ -239,6 +239,15 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Product web bundle prerequisites
+        if: inputs.mobile == 'true'
+        run: |
+          set -euo pipefail
+          if [ -d apps/coder-mobile/web ]; then
+            rustup target add wasm32-unknown-unknown
+            cargo install dioxus-cli --locked --version 0.7.10
+          fi
+
       - name: Android 工具链（SDK / NDK 三变量 / aarch64 target）
         if: inputs.mobile == 'true'
         run: |
@@ -264,7 +273,12 @@ jobs:
         run: |
           set -euo pipefail
           shell_root=$([ -d platforms ] && echo platforms || echo apps)
-          cd "${shell_root}/mobile"
+          if [ "$shell_root" = "apps" ]; then
+            mobile_dir="apps/coder-mobile"
+          else
+            mobile_dir="platforms/mobile"
+          fi
+          cd "$mobile_dir"
           SPEC="${{ steps.pkg.outputs.dist }}"
           SPEC="${SPEC#ferrite-}"
           bun install
