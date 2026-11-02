@@ -417,7 +417,7 @@ jobs:
       - name: 规范文档工具名守卫
         if: steps.flags.outputs.rules == 'true'
         timeout-minutes: 15
-        run: cargo test -p harness-agent-loop --test tool_selection_tests --profile ci
+        run: cargo test -p coder-tools --test tool_selection_tests --profile ci
 
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
