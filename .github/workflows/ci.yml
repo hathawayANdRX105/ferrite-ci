@@ -184,14 +184,15 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（lint 角色，restore-only）
+      # stable 车道（lint / test / app-shell）共用**一条** sccache 缓存，见 lint job
+      # 保存步骤的预算说明：三个角色各写各的会把仓库级 10 GB 预算挤爆。
+      - name: Cache sccache 产物（stable 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-lint-${{ runner.os }}-v0.10.0-
-            sccache-test-${{ runner.os }}-v0.10.0-
+            sccache-stable-${{ runner.os }}-v0.10.0-
 
       - name: 装 Bun（web 样式构建链）
         if: steps.scope.outputs.mode != 'docs-only'
@@ -428,12 +429,19 @@ jobs:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: 回填 sccache 缓存（仅写入方，日键）
+      # **stable 车道的唯一写入方**。GitHub 仓库级缓存预算 10 GB，而 sccache 目录
+      # 实测 7 GiB（统计行 `Cache size 7 GiB`）：lint 与 test 原先各写一条 ~7 GB
+      # 日键条目 = 14 GB，超预算后每次保存都触发 LRU 淘汰，把 cargo 依赖缓存和别的
+      # 角色条目一起挤掉（实测 run 41611764593 三个 job 全是
+      # `Cache not found for input keys: cargo-Linux-…`）。
+      # 只留 lint 写，稳态约 7 GB(sccache) + 0.5 GB(dylint 角色) + 0.5 GB(registry)
+      # ≈ 8 GB，留出余量；日键轮换后旧条目不再被命中，自然落到 LRU 末尾被淘汰。
+      - name: 回填 sccache 缓存（stable 共享角色，日键，仅 lint 写）
         if: always() && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-lint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
   # 端上壳编译守卫：apps|platforms/{desktop,mobile} 各自独立 workspace（shell_root 探测双布局），根 Cargo.toml 的 members
   # 不含它们，clippy --all-targets / just test 都编不到——而两个壳都在**编译期**调
@@ -543,15 +551,13 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（app-shell 角色，restore-only）
+      - name: Cache sccache 产物（stable 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-appshell-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-appshell-${{ runner.os }}-v0.10.0-
-            sccache-lint-${{ runner.os }}-v0.10.0-
-            sccache-test-${{ runner.os }}-v0.10.0-
+            sccache-stable-${{ runner.os }}-v0.10.0-
       - name: 装 Bun（web 样式/WASM 构建链）
         if: steps.scope.outputs.mode != 'docs-only'
         uses: oven-sh/setup-bun@v2
@@ -562,16 +568,19 @@ jobs:
         if: steps.scope.outputs.mode != 'docs-only'
         run: rustup target add wasm32-unknown-unknown
 
-      - name: 装 Dioxus CLI
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: cargo install dioxus-cli --locked --version 0.7.10
-
       - name: 取 base 分支（壳编译判定用）
         run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
 
-      - name: 端上壳 cargo check（diff 门禁）
+      # 端上壳改动面判定：dx 安装与壳编译共用这一次判定。
+      # 原先只有壳编译 step 自己算 diff，dx 安装却按「非 docs-only」无条件跑 ——
+      # apps|platforms 无变更的 run 白付一次 `cargo install dioxus-cli`
+      # （实测 run 41611764593：编译 639 个 crate、8m24s，日志里
+      # `Finished release profile ... in 8m 24s`），随后壳编译 step 才打印
+      # 「apps|platforms 无变更」退出。判定提到前面，环上两个 step 都按它门控。
+      # 保守纪律与壳编译 step 完全一致：拿不到 base 时按「有变更」跑。
+      - name: 判定端上壳改动面
+        id: shells
         if: steps.scope.outputs.mode != 'docs-only'
-        timeout-minutes: 30
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.pr }}" ]; then
@@ -589,16 +598,45 @@ jobs:
           fi
           if [ -z "$files" ]; then
             echo "::notice::apps|platforms 无变更，端上壳编译跳过"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           printf '%s\n' "$files" | sed 's/^/  壳变更: /'
+          echo "changed=true" >> "$GITHUB_OUTPUT"
           if [ -d apps/coder-desktop/src-tauri ]; then
-            shell_root="apps"
-            shells="coder-desktop coder-mobile"
+            echo "root=apps" >> "$GITHUB_OUTPUT"
+            echo "shells=coder-desktop coder-mobile" >> "$GITHUB_OUTPUT"
           else
-            shell_root="platforms"
-            shells="desktop mobile"
+            echo "root=platforms" >> "$GITHUB_OUTPUT"
+            echo "shells=desktop mobile" >> "$GITHUB_OUTPUT"
           fi
+
+      # dx 是单文件二进制（dioxus-cli 的 bin，不带数据文件；实测 `ldd` 只链系统库、
+      # 直接执行即可），按版本钉缓存：装一次 8m24s（639 个 crate 全量编译，release
+      # 车道的独有产物 sccache 命中不了），命中缓存后只剩一次 tar 解包。
+      # 键里带版本 —— 升级 dioxus-cli 时必须同步改这里（与 nextest/testless 的 v1
+      # 键同一纪律）。
+      - name: Cache Dioxus CLI
+        id: dx-bin
+        # 只有 apps 世代调 `dx build`（platforms 世代只跑 cargo check），
+        # 别在旧布局上白装一次 dx。
+        if: steps.shells.outputs.changed == 'true' && steps.shells.outputs.root == 'apps'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/dx
+          key: dioxus-cli-${{ runner.os }}-${{ runner.arch }}-0.7.10
+
+      - name: 装 Dioxus CLI（缓存命中则跳过）
+        if: steps.shells.outputs.changed == 'true' && steps.shells.outputs.root == 'apps' && steps.dx-bin.outputs.cache-hit != 'true'
+        run: cargo install dioxus-cli --locked --version 0.7.10
+
+      - name: 端上壳 cargo check（diff 门禁）
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          shell_root="${{ steps.shells.outputs.root }}"
+          shells="${{ steps.shells.outputs.shells }}"
           for shell in $shells; do
             dir="${shell_root}/${shell}/src-tauri"
             if [ ! -d "$dir" ]; then
@@ -830,14 +868,13 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（test 角色，restore-only）
+      - name: Cache sccache 产物（stable 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-test-${{ runner.os }}-v0.10.0-
-            sccache-lint-${{ runner.os }}-v0.10.0-
+            sccache-stable-${{ runner.os }}-v0.10.0-
 
       # nextest 是 test-fast / test-full 的**测试运行器**（两条车道都用它）。
       # 用官方预编译包而不是 `cargo install cargo-nextest` —— 后者要自己编十几分钟。
@@ -900,12 +937,10 @@ jobs:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: 回填 sccache 缓存（仅写入方，日键）
-        if: always() && (inputs.pr == '' || inputs.full == 'true')
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/sccache
-          key: sccache-test-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+      # test 不再回填 sccache：stable 车道的写入方只有 lint（理由见 lint job 的
+      # 保存步骤）。test 原先那条 `sccache-test-*` 条目从来没活过一轮 ——
+      # 实测缓存列表里始终只有一条 7.2 GB 的 sccache 条目 + 两个二进制键。
+      # registry（~/.cargo）仍由本 job 回填：它只有几百 MB，是各 job 都要读的那份。
 
   # 聚合两关卡结果，写 commit status `shell-ci` 回主仓：落点 = status_sha（空则回退 sha）。
   report:
@@ -1170,6 +1205,47 @@ jobs:
           timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
           timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
 
+      # ── 缓存面 ────────────────────────────────────────────────────────────
+      # 本 job 此前**一条缓存都没有**：实测 run 41602562540 的 sccache 统计是
+      # `Cache hits rate (Rust) 0.07 %`、1420 次 Rust 编译全为重编，其中约
+      # 12m40s 花在编译 rust-specs 的 20 个 lint 库（clippy_utils 是 git 依赖，
+      # 每个 run 从零编一遍）。
+      # 写入方与 lint/test 不同：dylint 只在 PR 跑，没有全量 run 替它回填，
+      # 所以这里是自己写自己读（PR 车道即写入方）。角色键独立于 stable 车道 ——
+      # nightly + rustc-dev 编出的产物与 stable 不通用，混用只会互相挤兑
+      # 仓库级 10 GB 缓存预算（今天单条 sccache-lint 条目就占 7.2 GB）。
+      - name: Cache 依赖（registry，lint 库的 clippy_utils 也走这里）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（dylint 角色）
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-dylint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-dylint-${{ runner.os }}-v0.10.0-
+
+      # cargo-dylint / dylint-link 是 nightly 编出来的两个 `cargo install`（实测 121s），
+      # 与 lint 规则内容无关，按工具链钉键即可长期复用。两者同一键、成对出现：
+      # 版本错配会让 rustc 加载 lint 库直接失败。升级 cargo-dylint 时 bump v1。
+      - name: Cache dylint 工具二进制
+        id: dylint-bin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-dylint
+            ~/.cargo/bin/dylint-link
+          key: dylint-bin-${{ runner.os }}-nightly-2026-08-20-v1
+
       - name: 算改动涉及的工作区成员
         id: scope
         run: |
@@ -1207,10 +1283,15 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install nightly-2026-08-20 --profile minimal --component rustc-dev
-          cargo +nightly-2026-08-20 install cargo-dylint --locked
-          # dylint-link 是独立 crate：编译 lint 库时 rustc 要用它当 linker，缺了就报
-          # "linker `dylint-link` not found"。版本与 cargo-dylint 对齐（6.2.x）。
-          cargo +nightly-2026-08-20 install dylint-link --locked
+          if [ "${{ steps.dylint-bin.outputs.cache-hit }}" = "true" ]; then
+            echo ">>> cargo-dylint / dylint-link 命中二进制缓存，跳过 cargo install"
+            cargo +nightly-2026-08-20 dylint --version
+          else
+            cargo +nightly-2026-08-20 install cargo-dylint --locked
+            # dylint-link 是独立 crate：编译 lint 库时 rustc 要用它当 linker，缺了就报
+            # "linker `dylint-link` not found"。版本与 cargo-dylint 对齐（6.2.x）。
+            cargo +nightly-2026-08-20 install dylint-link --locked
+          fi
 
       - name: 跑 dylint（只扫改动成员）
         id: dylint
@@ -1264,54 +1345,74 @@ jobs:
           LINT_ALLOW="${LINT_ALLOW#,}"
           failed=0
           IFS=',' read -ra PKGS <<< "$PACKAGES"
+          pargs=()
           for pkg in "${PKGS[@]}"; do
-            echo ">>> dylint -p $pkg"
-            rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
-            set +e
-            DYLINT_RUSTFLAGS="$LINT_FLAGS" cargo +nightly-2026-08-20 dylint \
-              --no-deps --path "$RUST_SPECS" --pattern '*' --all \
-              -p "$pkg" -- --message-format=json \
-              > /tmp/dylint-out-$$.json 2> /tmp/dylint-$$.err
-            code=$?
-            set -e
-            # 诊断读 stdout 的 JSON（compiler-message），编译日志在 stderr。
-            # 只收 rust-specs 自己声明的 lint ID：dylint 的 lint 库只在被检查的
-            # crate 自身编译时注册，对依赖 crate 不生效，于是依赖方会收到
-            # "unknown lint"（E0602）等 rustc 自身诊断——那些不是规范 finding。
-            findings="$(jq -r --arg allow "$LINT_ALLOW" '
-              select(.reason == "compiler-message")
-              | select(.message.code != null)
-              | select((.message.spans | length) > 0)
-              | select((.message.code.code | ascii_downcase) as $c
-                       | ($allow | split(",") | index($c)) != null)
-              | [(.message.code.code | ascii_downcase),
-                 (.message.spans[0].file_name // ""),
-                 ((.message.spans[0].line_start // 0) | tostring),
-                 (.message.message // "")]
-              | @tsv' /tmp/dylint-out-$$.json 2>/dev/null || true)"
-            if [ -n "$findings" ]; then
-              while IFS=$'\t' read -r id path line msg; do
-                [ -n "$id" ] || continue
-                if printf '%s' "$BLOCKING_LINTS" | tr ',' '\n' | grep -qx "$id"; then
-                  echo ">>> [BLOCK $id] $path:$line  $msg"
-                  failed=1
-                else
-                  echo ">>> [report $id] $path:$line  $msg"
-                fi
-              done <<< "$findings"
-            fi
-            if [ "$code" != "0" ] && [ -z "$findings" ]; then
-              echo ">>> dylint crashed for $pkg (exit $code)"
-              tail -20 /tmp/dylint-$$.err
-              failed=1
-            fi
-            rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
+            echo ">>> dylint scope: -p $pkg"
+            pargs+=(-p "$pkg")
           done
+          # 一次调用扫全部改动成员，而不是每个包起一次 cargo。
+          # 实测 run 41602562540：19 个包串行 659s（coder-host 114s、coder-tools 95s、
+          # mcp-bin 78s …），每次调用都要重新加载 20 个 lint 库，cargo 也无法跨包并行。
+          # 多个 `-p` 是 cargo-dylint 自己的 clap 定义（`-p, --package <SPEC>`，可重复）；
+          # 已在两 crate 的 fixture 上实测：单次 `-p a -p b` 出一条 JSON 流、两个包的
+          # finding 都在（a/src/lib.rs 与 b/src/lib.rs 各 1 条），退出码与 -- 之前的
+          # `-D` 语义不变。
+          # 判定口径一字未动：仍是 --no-deps + 全量 lint 名单 + 按 lint ID 过滤 JSON。
+          rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
+          set +e
+          DYLINT_RUSTFLAGS="$LINT_FLAGS" cargo +nightly-2026-08-20 dylint \
+            --no-deps --path "$RUST_SPECS" --pattern '*' --all \
+            "${pargs[@]}" -- --message-format=json \
+            > /tmp/dylint-out-$$.json 2> /tmp/dylint-$$.err
+          code=$?
+          set -e
+          # 诊断读 stdout 的 JSON（compiler-message），编译日志在 stderr。
+          # 只收 rust-specs 自己声明的 lint ID：dylint 的 lint 库只在被检查的
+          # crate 自身编译时注册，对依赖 crate 不生效，于是依赖方会收到
+          # "unknown lint"（E0602）等 rustc 自身诊断——那些不是规范 finding。
+          findings="$(jq -r --arg allow "$LINT_ALLOW" '
+            select(.reason == "compiler-message")
+            | select(.message.code != null)
+            | select((.message.spans | length) > 0)
+            | select((.message.code.code | ascii_downcase) as $c
+                     | ($allow | split(",") | index($c)) != null)
+            | [(.message.code.code | ascii_downcase),
+               (.message.spans[0].file_name // ""),
+               ((.message.spans[0].line_start // 0) | tostring),
+               (.message.message // "")]
+            | @tsv' /tmp/dylint-out-$$.json 2>/dev/null || true)"
+          if [ -n "$findings" ]; then
+            while IFS=$'\t' read -r id path line msg; do
+              [ -n "$id" ] || continue
+              if printf '%s' "$BLOCKING_LINTS" | tr ',' '\n' | grep -qx "$id"; then
+                echo ">>> [BLOCK $id] $path:$line  $msg"
+                failed=1
+              else
+                echo ">>> [report $id] $path:$line  $msg"
+              fi
+            done <<< "$findings"
+          fi
+          if [ "$code" != "0" ] && [ -z "$findings" ]; then
+            echo ">>> dylint crashed (exit $code)"
+            tail -20 /tmp/dylint-$$.err
+            failed=1
+          fi
+          rm -f /tmp/dylint-out-$$.json /tmp/dylint-$$.err
           if [ "$failed" = "1" ]; then
             echo "result=failure" >> "$GITHUB_OUTPUT"
           else
             echo "result=success" >> "$GITHUB_OUTPUT"
           fi
+
+      # 回填放在状态回写之前，且用 always()：lint 报错时这些编译产物同样值得留
+      # （缓存只关心「编过一次」，与门禁结论无关）。键必须与上面 restore 完全一致。
+      - name: 回填 sccache 缓存（dylint 角色，日键）
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-dylint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
       - name: 回写 commit status `rust-specs-dylint`
         if: always()
