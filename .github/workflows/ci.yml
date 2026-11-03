@@ -527,13 +527,21 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
 
-      # 同 test job 的「释放 runner 磁盘」（两处清单需同步）：恢复 sccache 缓存时
-      # 曾写满根分区（No space left on device，ferrite PR #609 复跑）。
-      - name: 释放 runner 磁盘（删本 job 不用的预装工具链）
+      # 同 test job 的「释放 runner 磁盘」（两处逻辑与清单需同步）：恢复 sccache
+      # 缓存时曾写满根分区（No space left on device，ferrite PR #609 复跑）。
+      # 与 test job 同样按 df 余量门控：实测删除要 76s，而 runner 空闲普遍 85G，
+      # 低余量才值得删。删除清单与原先完全一致。
+      - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
         if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
-          df -h /
+          free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
+          before="$(free_gib)"
+          echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
+          if [ "$before" -ge 60 ]; then
+            echo ">>> 余量充足，跳过释放"
+            exit 0
+          fi
           sudo rm -rf \
             /usr/local/lib/android \
             /usr/share/dotnet \
@@ -545,7 +553,7 @@ jobs:
             /usr/local/lib/node_modules \
             /opt/microsoft /opt/google/chrome /usr/local/share/chromium
           sudo docker image prune -af >/dev/null || true
-          df -h /
+          echo ">>> 释放后空闲 $(free_gib) GiB"
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
@@ -837,16 +845,23 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
 
-      # PR 快关碰到 README / AGENTS / scripts 时 testless 会选中两千多条用例、近乎全仓
-      # 链接测试二进制，曾两次在「测试」步写满根分区（runner 日志 No space left on
-      # device，ferrite PR #609）。这里删掉本 job 用不到的预装工具链腾空间（实测空闲
-      # 85G → 117G，run 41205647151）；正在运行的 postgres service 容器其镜像不会被
-      # prune。前后各打一次 df 便于跟踪余量。app-shell-check 有同一步，两处清单需同步。
-      - name: 释放 runner 磁盘（删本 job 不用的预装工具链）
+      # 释放 runner 磁盘：**只在余量不足时才删**。实测这一步要 69–138s，而现代
+      # ubuntu runner 空闲普遍 85G（删完 117G）——绝大多数 run 白等两分钟。
+      # ENOSPC（PR #609）发生在低余量的 runner 上，所以判据用 df 余量而不是
+      # 无条件删除：低于 60 GiB 才清（留量覆盖 sccache 还原 7G + 全仓测试构建
+      # ~25G + postgres 容器）。app-shell-check 有同一步，两处需同步。
+      # 删除清单与原先完全一致；正在运行的 postgres service 容器其镜像不会被 prune。
+      - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
         if: steps.scope.outputs.mode != 'docs-only'
         run: |
           set -euo pipefail
-          df -h /
+          free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
+          before="$(free_gib)"
+          echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
+          if [ "$before" -ge 60 ]; then
+            echo ">>> 余量充足，跳过释放"
+            exit 0
+          fi
           sudo rm -rf \
             /usr/local/lib/android \
             /usr/share/dotnet \
@@ -858,7 +873,7 @@ jobs:
             /usr/local/lib/node_modules \
             /opt/microsoft /opt/google/chrome /usr/local/share/chromium
           sudo docker image prune -af >/dev/null || true
-          df -h /
+          echo ">>> 释放后空闲 $(free_gib) GiB"
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
