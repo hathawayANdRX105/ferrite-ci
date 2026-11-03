@@ -200,7 +200,7 @@ jobs:
         with:
           bun-version: latest
 
-      # 样式类守卫（check-style-classes.mjs）+ 双入口 CSS 构建在 CI 硬拦：
+      # 样式类守卫（check-style-classes.mjs）+ web 入口 CSS 构建在 CI 硬拦：
       # 未登记页面类 / kit 配方漂移在这里红，不等浏览器冒烟。
       # The shared workflow checks both main's current layout and the product-entry
       # cutover branch; every entry present in that source generation must build.
@@ -219,8 +219,10 @@ jobs:
             if [ ! -d "$d" ]; then echo "missing web entry dir: $d" >&2; exit 1; fi
             (cd "$d" && bun install --frozen-lockfile && bun run css)
           done
-          if [ ! -d "$kit_dir" ]; then echo "missing kit-demo dir: $kit_dir" >&2; exit 1; fi
-          (cd "$kit_dir" && bun install --frozen-lockfile && bun run css)
+          # kit-demo 入口已从私有仓 main 移除；世代里目录还在（旧世代分支）才构建。
+          if [ -d "$kit_dir" ]; then
+            (cd "$kit_dir" && bun install --frozen-lockfile && bun run css)
+          fi
 
       # ui-components 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
       # const（TOKEN_GROUPS）与 asset CSS 的 diff，快关会漏选 theme/style 契约。
@@ -253,7 +255,7 @@ jobs:
       # 判定与编译都在主仓的 scripts/wasm-check.sh 里：默认走文件级路径判定，因为本 job
       # 不装 testless（装它要多花一次 cargo install，而那是 test job 的事）；显式设
       # WASM_CHECK_DECIDER=files 而不是靠「testless 恰好没装」这种隐式契约。
-      # 命中 crates/ui/**、bin/web/**、bin/kit-demo/**、crates/harness/agent-prompts/
+      # 命中 crates/ui/**、bin/web/**、crates/harness/agent-prompts/
       # 下的 .rs/.toml 才真编；无关改动秒级跳过；根 Cargo.toml/Cargo.lock 变动与拿不到
       # diff 一律保守跑（与 test-fast 的降级纪律同源）。
       - name: 取 base 分支（wasm 门禁判定用）
