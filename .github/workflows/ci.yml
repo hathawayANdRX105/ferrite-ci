@@ -440,9 +440,15 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '[.packages[].name] | map(select(. == "coder-tools" or . == "harness-tools")) | first // empty')
+          # 拥有者随世代移动（#629 前后各住一个包），且**目标名随世代改名**：
+          # 旧世代包叫 harness-agent-prompts，新世代测试文件挪进 coder-tools 后
+          # 名字不变 —— 但 cargo 的 --test 按目标名匹配，必须问 metadata 要真身，
+          # 硬编码任一世代都会把另一世代带红（run 41657857741 / 41660998543 实测：
+          # 旧树报 `did not match any packages`，新树报 `no test target named`）。
+          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '
+            [.packages[] | select(any(.targets[]; .name == "tool_selection_tests")) | .name] | first // empty')
           if [ -z "$PKG" ]; then
-            echo ">>> 树上没有 coder-tools / harness-tools（product-entry 拆分前的过渡树）；跳过"
+            echo ">>> 树上没有拥有 tool_selection_tests 的包；跳过"
             exit 0
           fi
           echo "tool-name guard: package = $PKG"
