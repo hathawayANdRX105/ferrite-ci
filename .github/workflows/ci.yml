@@ -539,6 +539,9 @@ jobs:
           set -euo pipefail
           free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
           before="$(free_gib)"
+          # df 输出格式若与预期不符（空 / 带单位 / 非数字），按低余量处理 ——
+          # 删除落在保守侧（这一步原本就是无条件删除）。
+          case "$before" in ''|*[!0-9]*) before=0 ;; esac
           echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
           if [ "$before" -ge 60 ]; then
             echo ">>> 余量充足，跳过释放"
@@ -859,6 +862,9 @@ jobs:
           set -euo pipefail
           free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
           before="$(free_gib)"
+          # df 输出格式若与预期不符（空 / 带单位 / 非数字），按低余量处理 ——
+          # 删除落在保守侧（这一步原本就是无条件删除）。
+          case "$before" in ''|*[!0-9]*) before=0 ;; esac
           echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
           if [ "$before" -ge 60 ]; then
             echo ">>> 余量充足，跳过释放"
