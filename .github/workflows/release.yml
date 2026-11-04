@@ -1,19 +1,19 @@
 # ferrite 发布壳工作流：私有主仓（地址只在下方 PRIVATE_REPO env 出现）推 ferrite-v* tag（或手动派发），
 # 由主仓 ferrite-release.yml 派发触发（on 只有 workflow_dispatch，同 ci.yml 不变量）。
-# 检出凭据拉私有源码构建，产物两边同步发布（维护者 2026-10-09 决策：二进制 + config 模板 +
+# 检出凭据拉私有源码构建，产物两边同步发布（维护者 2026-10-09 决策：二进制 + APK +
 # 五组 notes 可公开）：私有主仓 + 本公开壳仓，同一 tag 同一份资产与 notes。
 # 源码仍不进壳仓：只在一次性 runner 检出，提交进本仓的只有 workflow YAML，Actions artifact 恒为 0。
 #   tag 非空 且 dry_run=false → 两侧 Release 同步（缺失则创建，已存在则 clobber 资产并对齐 notes）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
 #
-# 形态 asset（方案 A：一条版本线，一个 tag 挂每个形态一份产物；形态别名定义在
-# 私有仓 apps/api/Cargo.toml，本 workflow 只消费并随形态世代自适应）：
-#   三形态世代（ferrite-{local,tavern,server} 别名存在时）：
-#     ferrite-local   --no-default-features --features ferrite-local   （个人 relay，无 billing/mcp）
-#     ferrite-tavern  --no-default-features --features ferrite-tavern  （用户酒馆，仅 tavern）
-#     ferrite-server  --no-default-features --features ferrite-server  （服务器，tavern+billing+mcp）
-#   单形态世代（别名收敛后）：只出 ferrite-server，default 特性构建（= 原 server
-#   形态；tavern 删除后 default 即完整产品），docker tag 契约不变（server = :latest）。
+# 发布配方（单一来源）：优先读被发版 ref 的 deploy/compose.yml 末尾 x-release 块——
+# Dockerfile 路径、形态、cargo 开关、tarball 包名与镜像坐标都来自主仓 deploy/ 树
+# （目录与 apps/server/{api,web} 一一对位，见主仓 deploy/README.md）；本仓不再
+# 自持第一份路径。老 ref 无该块时回退本仓世代探测（行为不变）：
+#   三形态世代（ferrite-{local,tavern,server} 别名存在时）：三条各自
+#     --no-default-features --features <别名>，三份 tarball 与三个 api 镜像 tag
+#     （local/tavern 用形态名，server 用 :latest）。
+#   单形态世代（别名收敛后）：只出 server，default 特性构建（= 完整产品）。
 # 各形态共用同一 tag、同一 release notes，notes 不按形态分裂。
 # 移动壳（apps|platforms/mobile，shell_root 探测双布局）恒随同一 tag 出一份 Android debug APK：
 #   ferrite-mobile-<版本段>.apk（universal、未 strip，体积大属预期）。
@@ -64,7 +64,7 @@ env:
   CARGO_TERM_COLOR: always
   PRIVATE_REPO: hathawayANdRX105/ferrite
   # GHCR 命名空间：镜像挂在维护者账号下，别人才能 ghcr.io/hathawayANdRX105/... 拉取。
-  # deploy/compose.yml 的 image 字段必须与这里一致。
+  # 只用作 docker login 的用户名；推送坐标（registry/tag）由「读取发布配方」步骤给出。
   PRIVATE_REPO_OWNER: hathawayANdRX105
 
 jobs:
@@ -120,28 +120,63 @@ jobs:
             sccache-test-${{ runner.os }}-v0.10.0-
             sccache-lint-${{ runner.os }}-v0.10.0-
 
-      - name: 探测形态（随 apps/api 的别名世代自适应）
-        id: shapes
+      - name: 读取发布配方（优先主仓 deploy/compose.yml 的 x-release）
+        id: recipe
         run: |
           set -euo pipefail
-          # 形态清单落在 shapes.txt：每行 <形态名>|<cargo feature 参数>（可为空）。
-          # 三形态世代（ferrite-local 别名存在）：三条各自 --no-default-features，
-          # 每条都不能省——省掉它 default 仍生效，三条会全变成同一形态；单形态
-          # 世代（tavern 删除后别名收敛）：只出 server 一条，default 特性即完整产品。
-          # 判定问 cargo metadata 要真身（同 ci.yml 的世代自适应风格）。
-          if cargo metadata --format-version 1 --no-deps \
-            | jq -e '.packages[] | select(.name == "api") | .features | has("ferrite-local")' > /dev/null; then
-            printf '%s\n' \
-              'local|--no-default-features --features ferrite-local' \
-              'tavern|--no-default-features --features ferrite-tavern' \
-              'server|--no-default-features --features ferrite-server' > shapes.txt
+          # 发布构建配方的单一来源 = 被发版 ref 的 deploy/compose.yml 末尾 x-release 块
+          # （见主仓 deploy/README.md）。compose config 只做解析插值、不起容器；文件里的
+          # 必填变量插值用哑值满足。老 ref 无该块 → 回退本仓世代探测：问 cargo metadata
+          # 的 features 真身（同 ci.yml 的世代自适应风格），配方字段取旧世代等价值。
+          RECIPE=""
+          if [ -f deploy/compose.yml ]; then
+            RECIPE=$(FERRITE_JWT_SECRET=recip-parse docker compose -f deploy/compose.yml config --format json 2>/dev/null \
+              | jq -c '."x-release" // empty') || RECIPE=""
+          fi
+          if [ -n "$RECIPE" ]; then
+            echo '>>> 发布配方：deploy/compose.yml x-release'
+            # 块存在但字段缺失是发布配置错误，宁可炸也不静默回退（配方漂移必须响）。
+            jq -e 'has("form") and has("bin_pkg") and has("api_features")
+                   and has("dockerfile_api") and has("dockerfile_web")
+                   and has("image_registry") and has("image_tag")' <<<"$RECIPE" >/dev/null
+            printf '%s|%s\n' "$(jq -r '.form' <<<"$RECIPE")" "$(jq -r '.api_features' <<<"$RECIPE")" > shapes.txt
+            {
+              echo "source=compose"
+              echo "bin_pkg=$(jq -r '.bin_pkg' <<<"$RECIPE")"
+              echo "dockerfile_api=$(jq -r '.dockerfile_api' <<<"$RECIPE")"
+              echo "dockerfile_web=$(jq -r '.dockerfile_web' <<<"$RECIPE")"
+              echo "image_registry=$(jq -r '.image_registry' <<<"$RECIPE")"
+              echo "image_tag=$(jq -r '.image_tag' <<<"$RECIPE")"
+            } >> "$GITHUB_OUTPUT"
           else
-            printf '%s\n' 'server|' > shapes.txt
+            echo '>>> 发布配方：老 ref 回退（本仓世代探测）'
+            # 形态清单落在 shapes.txt：每行 <形态名>|<cargo feature 参数>（可为空）。
+            # 三形态世代每条都不能省 --no-default-features——省掉 default 仍生效，
+            # 三条会全变成同一形态；单形态世代只出 server 一条，default 即完整产品。
+            if cargo metadata --format-version 1 --no-deps \
+              | jq -e '.packages[] | select(.name == "api") | .features | has("ferrite-local")' > /dev/null; then
+              printf '%s\n' \
+                'local|--no-default-features --features ferrite-local' \
+                'tavern|--no-default-features --features ferrite-tavern' \
+                'server|--no-default-features --features ferrite-server' > shapes.txt
+            else
+              printf '%s\n' 'server|' > shapes.txt
+            fi
+            {
+              echo "source=legacy"
+              echo "bin_pkg=api"
+              echo "dockerfile_api=deploy/api/Dockerfile"
+              echo "dockerfile_web=deploy/web/Dockerfile"
+              echo "image_registry=ghcr.io/${PRIVATE_REPO_OWNER}"
+              echo "image_tag=latest"
+            } >> "$GITHUB_OUTPUT"
           fi
           echo '>>> 形态清单（<形态名>|<feature 参数>）：'
           cat shapes.txt
 
       - name: 编译形态二进制
+        env:
+          BIN_PKG: ${{ steps.recipe.outputs.bin_pkg }}
         run: |
           set -euo pipefail
           # 各形态 feature 图不同 → 各自独立 cargo build，且 --target-dir 必须隔离
@@ -149,7 +184,7 @@ jobs:
           build_one() {
             local name="$1"; shift
             echo ">>> cargo build ferrite-${name}: $*"
-            cargo build --release -p api --target-dir "target/rel-${name}" "$@"
+            cargo build --release -p "$BIN_PKG" --target-dir "target/rel-${name}" "$@"
             cp "target/rel-${name}/release/ferrite" "out-bin/ferrite-${name}"
           }
           mkdir -p out-bin
@@ -161,7 +196,9 @@ jobs:
           done < shapes.txt
           ls -l out-bin
 
-      - name: 打包
+      - name: 打包（tarball 命名随配方世代）
+        env:
+          SOURCE: ${{ steps.recipe.outputs.source }}
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
@@ -202,8 +239,9 @@ jobs:
             section "Fixed"            '^(fix|perf)(\([^)]*\))?:'
             section "Removed"          '^revert(\([^)]*\))?:'
           } > release-notes.md
-          # 每形态一份 tarball：目录名 = 形态前缀 + 版本段，tar 内是该形态二进制 +
-          # prompt 语料。
+          # tarball：配方世代（单构建）→ 资产名 = tag + -linux-x86_64.tar.gz（主仓
+          # deploy/README.md 口径），内层目录名 = DIST；老世代回退（逐形态）→ 每形态
+          # 一份，目录名 = 形态前缀 + 版本段。
           # 语料必须是运行时资产：渠道探活（channel_test）从
           # config/prompt-templates.jsonl 读提问语料，二进制不内嵌它
           # （见 control_plane::prompt_templates::load_templates）。
@@ -211,7 +249,11 @@ jobs:
           mkdir -p dist
           while IFS='|' read -r form _; do
             [ -n "$form" ] || continue
-            ADIST="ferrite-${form}-${DIST#ferrite-}"
+            if [ "$SOURCE" = compose ]; then
+              ADIST="$DIST"
+            else
+              ADIST="ferrite-${form}-${DIST#ferrite-}"
+            fi
             mkdir -p "dist/${ADIST}/config"
             cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
             cp config/prompt-templates.jsonl "dist/${ADIST}/config/"
@@ -292,20 +334,18 @@ jobs:
           du -h "../../dist/ferrite-mobile-${SPEC}.apk"
 
       # ---- 容器镜像（GHCR）----
-      # deploy/ 的两个 Dockerfile 早已按形态构建（deploy/api/Dockerfile 的
-      # FEATURES build-arg、deploy/web/Dockerfile 的 dx build），此处只是把它们
-      # 接到发布链上，让「别人 docker compose up 就能用」成立——此前
-      # deploy/compose.yml 引的 ghcr.io/newxapi/* 是第三方组织的私有镜像，
-      # 既非本项目产物也拉不到，等于 compose 的「快速跑」是坏的。
+      # Dockerfile 与镜像坐标来自「读取发布配方」步骤（单一来源 = 主仓 deploy/ 树；
+      # 老 ref 回退旧 deploy/{api,web} 路径）。把它们接在发布链上，让「别人 docker
+      # compose up 就能用」成立——deploy/compose.yml 的 image 字段与配方
+      # image_registry / image_tag 同源，主仓 deploy/README.md 有约束说明。
       #
-      # tag 口径与 compose 期望一致：compose.yml 读 :latest（= server 全功能形态），
-      # compose.personal.yml 读 :local；:tavern 按 deploy/README.md 的形态表补齐。
-      # 每形态额外打一个版本 tag，便于回溯某个 release 用了哪个镜像。
+      # tag 口径与 compose 期望一致：server → IMAGE_TAG（当前 :latest），其余形态用
+      # 形态名；每个镜像另打一个版本 tag，便于回溯某个 release 用了哪些镜像。
       #
       # 登录用 FERRITE_PAT（与主仓 Release 同步同一个 PAT）：镜像要挂在维护者账号下
       # 才能让别人拉；用 github.token 会挂在壳仓名下，而壳仓是公开壳、不是产物归属。
       # 依赖 FERRITE_PAT 具 write:packages 权限——该范围无法在此仓内自证，
-      # 首次推送后需确认 ghcr.io/hathayaANdRX105/ferrite-api 的 tags 列表。
+      # 首次推送后需确认 ghcr.io/hathawayANdRX105/ferrite-api 的 tags 列表。
       - name: 登录 GHCR
         if: inputs.tag != '' && inputs.dry_run != 'true'
         uses: docker/login-action@v3
@@ -318,46 +358,56 @@ jobs:
         if: inputs.tag != '' && inputs.dry_run != 'true'
         env:
           TAG: ${{ inputs.tag }}
+          DOCKERFILE_API: ${{ steps.recipe.outputs.dockerfile_api }}
+          DOCKERFILE_WEB: ${{ steps.recipe.outputs.dockerfile_web }}
+          REGISTRY: ${{ steps.recipe.outputs.image_registry }}
+          IMAGE_TAG: ${{ steps.recipe.outputs.image_tag }}
         run: |
           set -euo pipefail
           SPEC="${TAG#ferrite-v}"
-          # compose 的 tag 契约：server → :latest，其余用形态名；单形态世代清单
-          # 只有 server → 只推 :latest，deploy/compose.yml 的 image 契约不变。
-          tag_for() { case "$1" in server) echo latest ;; *) echo "$1" ;; esac; }
-          # FEATURES 传形态的 cargo 参数（可为空 = default 构建，见 deploy/api/Dockerfile）。
+          # compose 的 tag 契约：server → 配方的 IMAGE_TAG，其余形态用形态名；
+          # 单形态清单只有 server → 只推 IMAGE_TAG，deploy/compose.yml 的 image 契约不变。
+          tag_for() { case "$1" in server) echo "$IMAGE_TAG" ;; *) echo "$1" ;; esac; }
+          # FEATURES 传形态的 cargo 参数（可为空 = default 构建，见配方 dockerfile_api 头部说明）。
           while IFS='|' read -r form features; do
             [ -n "$form" ] || continue
-            docker build -f deploy/api/Dockerfile \
+            docker build -f "$DOCKERFILE_API" \
               --build-arg "FEATURES=${features}" \
-              -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")" \
-              -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}" \
+              -t "${REGISTRY}/ferrite-api:$(tag_for "$form")" \
+              -t "${REGISTRY}/ferrite-api:$(tag_for "$form")-${SPEC}" \
               .
-            docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")"
-            docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-api:$(tag_for "$form")-${SPEC}"
+            docker push "${REGISTRY}/ferrite-api:$(tag_for "$form")"
+            docker push "${REGISTRY}/ferrite-api:$(tag_for "$form")-${SPEC}"
           done < shapes.txt
-          # admin-web 三形态共用同一个 SPA（deploy/web/Dockerfile 无形态参数），
-          # deploy/README.md「已知差异」已注明按形态裁剪待 issue #59。
-          docker build -f deploy/web/Dockerfile \
-            -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:latest" \
-            -t "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:${SPEC}" .
-          docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:latest"
-          docker push "ghcr.io/${PRIVATE_REPO_OWNER}/ferrite-admin-web:${SPEC}"
+          # admin-web 各形态共用同一个 SPA（web 配方无形态参数），按形态裁剪跟踪在
+          # 主仓 issue #59。
+          docker build -f "$DOCKERFILE_WEB" \
+            -t "${REGISTRY}/ferrite-admin-web:${IMAGE_TAG}" \
+            -t "${REGISTRY}/ferrite-admin-web:${SPEC}" .
+          docker push "${REGISTRY}/ferrite-admin-web:${IMAGE_TAG}"
+          docker push "${REGISTRY}/ferrite-admin-web:${SPEC}"
 
       - name: 两边同步发布 GitHub Release（私有主仓 + 公开壳仓）
         if: inputs.tag != '' && inputs.dry_run != 'true'
         env:
           FERRITE_PAT: ${{ secrets.FERRITE_PAT }}
           SHELL_TOKEN: ${{ github.token }}
+          SOURCE: ${{ steps.recipe.outputs.source }}
         run: |
           set -euo pipefail
-          # 资产名 = ferrite-<形态>-<版本段>-linux-x86_64.tar.gz（版本段 = tag 去 ferrite- 前缀）
+          # 资产名：配方世代 = tag + -linux-x86_64.tar.gz（与打包步骤同源）；
+          # 老世代 = ferrite-<形态>-<版本段>-linux-x86_64.tar.gz（版本段 = tag 去 ferrite- 前缀）。
           DIST="${{ steps.pkg.outputs.dist }}"
           SPEC="${DIST#ferrite-}"
           ASSETS=()
-          while IFS='|' read -r form _; do
-            [ -n "$form" ] || continue
-            ASSETS+=("dist/ferrite-${form}-${SPEC}-linux-x86_64.tar.gz")
-          done < shapes.txt
+          if [ "$SOURCE" = compose ]; then
+            ASSETS+=("dist/${DIST}-linux-x86_64.tar.gz")
+          else
+            while IFS='|' read -r form _; do
+              [ -n "$form" ] || continue
+              ASSETS+=("dist/ferrite-${form}-${SPEC}-linux-x86_64.tar.gz")
+            done < shapes.txt
+          fi
           if [[ "${{ inputs.mobile }}" == "true" ]]; then
             test -f "dist/ferrite-mobile-${SPEC}.apk" || { echo "缺少移动资产 dist/ferrite-mobile-${SPEC}.apk"; exit 1; }
             ASSETS+=("dist/ferrite-mobile-${SPEC}.apk")
