@@ -1176,7 +1176,9 @@ jobs:
           set -euo pipefail
           mv "$GITHUB_WORKSPACE/rust-specs" "$RUNNER_TEMP/rust-specs"
 
-      # 准备门禁规则：复制 rust-specs 的全部 lint（通用语法 9 条 + dioxus 11 条）。
+      # 准备门禁规则：复制 rust-specs 的全部 lint（通用语法 8 条 + dioxus 10 条）。
+      # 2026-11-05：pick-outside-rsx 与 dioxus-rsx-no-if-else 随 ferrite 退役
+      # util::pick 从 rust-specs 删除，本清单同步移除。
       # 早先这里只复制 6 条，且 dylint 命令行缺少 --all 与具体 lint 名，
       # late lint 从未被真正启用——门禁一直空转。现在复制全量并按 lint ID 判定。
       - name: 准备门禁规则（复制全部 lint）
@@ -1190,10 +1192,10 @@ jobs:
           missing=0
           for name in ban-unwrap chainable-single-statement consecutive-same-shape-loops \
             early-return-needs-no-else expect-in-non-result let-if-else max-nesting-depth \
-            pick-outside-rsx redundant-branch-closures dioxus-effect-self-loop \
+            redundant-branch-closures dioxus-effect-self-loop \
             dioxus-globalsignal-discipline dioxus-layer-direction dioxus-ownership-imports \
             dioxus-props-contract dioxus-rsx-avoid-control-flow dioxus-rsx-cjk-text \
-            dioxus-rsx-list-key dioxus-rsx-nesting dioxus-rsx-no-if-else \
+            dioxus-rsx-list-key dioxus-rsx-nesting \
             dioxus-rsx-one-per-component
           do
             if [ ! -d "$RUNNER_TEMP/rust-specs/lints/$name" ]; then
@@ -1213,7 +1215,6 @@ jobs:
             expect-in-non-result \
             let-if-else \
             max-nesting-depth \
-            pick-outside-rsx \
             redundant-branch-closures
           do
             cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
@@ -1229,7 +1230,6 @@ jobs:
             dioxus-rsx-cjk-text \
             dioxus-rsx-list-key \
             dioxus-rsx-nesting \
-            dioxus-rsx-no-if-else \
             dioxus-rsx-one-per-component
           do
             cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
@@ -1366,14 +1366,15 @@ jobs:
           # 判定按 lint ID（JSON 诊断的 code 字段），不匹配报错文案——
           # 文案一改正则就失效，门禁会静默变绿。
           #
-          # 分级：通用语法 8 条全部阻断；dioxus 11 条中只有已达成共识的
-          # no-if-else / layer-direction / globalsignal-discipline 阻断，其余
+          # 分级：通用语法 7 条全部阻断；dioxus 10 条中只有已达成共识的
+          # layer-direction / globalsignal-discipline 阻断，其余
           # （rsx-nesting 等架构级规则）只报告不阻断——它们的存量规模大
           # （rsx-nesting 在 ui-components 单 crate 就有 134 条），
           # 一次性阻断会让所有 UI 改动都推不动。
+          # （no-if-else / pick-outside-rsx 已随 ferrite 退役 util::pick 删除。）
           LINT_FLAGS=""
           LINT_ALLOW=""
-          BLOCKING_LINTS="ban_unwrap,chainable_single_statement,consecutive_same_shape_loops,early_return_needs_no_else,expect_in_non_result,let_if_else,max_nesting_depth,pick_outside_rsx,redundant_branch_closures,dioxus_rsx_no_if_else,dioxus_layer_direction,dioxus_globalsignal_discipline"
+          BLOCKING_LINTS="ban_unwrap,chainable_single_statement,consecutive_same_shape_loops,early_return_needs_no_else,expect_in_non_result,let_if_else,max_nesting_depth,redundant_branch_closures,dioxus_layer_direction,dioxus_globalsignal_discipline"
           for name in \
             ban_unwrap \
             chainable_single_statement \
@@ -1382,7 +1383,6 @@ jobs:
             expect_in_non_result \
             let_if_else \
             max_nesting_depth \
-            pick_outside_rsx \
             redundant_branch_closures \
             dioxus_effect_self_loop \
             dioxus_globalsignal_discipline \
@@ -1393,7 +1393,6 @@ jobs:
             dioxus_rsx_cjk_text \
             dioxus_rsx_list_key \
             dioxus_rsx_nesting \
-            dioxus_rsx_no_if_else \
             dioxus_rsx_one_per_component
           do
             LINT_FLAGS="$LINT_FLAGS -D $name"
