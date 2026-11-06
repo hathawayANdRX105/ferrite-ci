@@ -84,7 +84,7 @@ jobs:
           fetch-depth: 0
 
       - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: 装 mold
         # apt 曾整段挂死；显式重试 + 硬超时，让故障快速失败可重跑（同 ci.yml）。

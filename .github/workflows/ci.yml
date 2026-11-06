@@ -157,8 +157,11 @@ jobs:
             echo "db_migrations=$db_migrations"
           } >> "$GITHUB_OUTPUT"
 
+      # ferrite 的 rust-toolchain.toml 固定 nightly-2026-08-20（Cranelift dev 后端 +
+      # dylint 需要的 rustc-dev），cargo 进入仓库目录会按该文件解析并自动安装；
+      # dtolnay 这里只保证 nightly 车道，日期与组件由主仓清单钉死。
       - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       # ui-components 契约测试要真实链接，mold 不可省；apt 加固同 test 关卡。
       - name: 装 mold
@@ -184,15 +187,17 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # stable 车道（lint / test / app-shell）共用**一条** sccache 缓存，见 lint job
+      # nightly 车道（lint / test / app-shell）共用**一条** sccache 缓存，见 lint job
       # 保存步骤的预算说明：三个角色各写各的会把仓库级 10 GB 预算挤爆。
-      - name: Cache sccache 产物（stable 共享角色，restore-only）
+      # 工具链换 pinned nightly 后编译器版本变了，旧 stable-key 缓存按编译器版本
+      # 分桶本来也不会命中，直接换键名保持口径一致。
+      - name: Cache sccache 产物（nightly 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-stable-${{ runner.os }}-v0.10.0-
+            sccache-nightly-${{ runner.os }}-v0.10.0-
 
       - name: 装 Bun（web 样式构建链）
         if: steps.scope.outputs.mode != 'docs-only'
@@ -465,19 +470,19 @@ jobs:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      # **stable 车道的唯一写入方**。GitHub 仓库级缓存预算 10 GB，而 sccache 目录
+      # **nightly 车道的唯一写入方**。GitHub 仓库级缓存预算 10 GB，而 sccache 目录
       # 实测 7 GiB（统计行 `Cache size 7 GiB`）：lint 与 test 原先各写一条 ~7 GB
       # 日键条目 = 14 GB，超预算后每次保存都触发 LRU 淘汰，把 cargo 依赖缓存和别的
       # 角色条目一起挤掉（实测 run 41611764593 三个 job 全是
       # `Cache not found for input keys: cargo-Linux-…`）。
       # 只留 lint 写，稳态约 7 GB(sccache) + 0.5 GB(dylint 角色) + 0.5 GB(registry)
       # ≈ 8 GB，留出余量；日键轮换后旧条目不再被命中，自然落到 LRU 末尾被淘汰。
-      - name: 回填 sccache 缓存（stable 共享角色，日键，仅 lint 写）
+      - name: 回填 sccache 缓存（nightly 共享角色，日键，仅 lint 写）
         if: always() && (inputs.pr == '' || inputs.full == 'true')
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
   # 端上壳编译守卫：apps|platforms/{desktop,mobile} 各自独立 workspace（shell_root 探测双布局），根 Cargo.toml 的 members
   # 不含它们，clippy --all-targets / just test 都编不到——而两个壳都在**编译期**调
@@ -560,7 +565,7 @@ jobs:
           sudo docker image prune -af >/dev/null || true
           echo ">>> 释放后空闲 $(free_gib) GiB"
       - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
       # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
@@ -598,13 +603,13 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（stable 共享角色，restore-only）
+      - name: Cache sccache 产物（nightly 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-stable-${{ runner.os }}-v0.10.0-
+            sccache-nightly-${{ runner.os }}-v0.10.0-
       - name: 装 Bun（web 样式/WASM 构建链）
         if: steps.scope.outputs.mode != 'docs-only'
         uses: oven-sh/setup-bun@v2
@@ -728,7 +733,7 @@ jobs:
           fetch-depth: 0
 
       - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: 装移动目标
         run: rustup target add aarch64-linux-android aarch64-apple-ios
@@ -883,7 +888,7 @@ jobs:
           sudo docker image prune -af >/dev/null || true
           echo ">>> 释放后空闲 $(free_gib) GiB"
       - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: 装 just（justfile 配方入口）
         if: steps.scope.outputs.mode != 'docs-only'
@@ -925,13 +930,13 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache sccache 产物（stable 共享角色，restore-only）
+      - name: Cache sccache 产物（nightly 共享角色，restore-only）
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-stable-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
-            sccache-stable-${{ runner.os }}-v0.10.0-
+            sccache-nightly-${{ runner.os }}-v0.10.0-
 
       # nextest 是 test-fast / test-full 的**测试运行器**（两条车道都用它）。
       # 用官方预编译包而不是 `cargo install cargo-nextest` —— 后者要自己编十几分钟。
@@ -994,7 +999,7 @@ jobs:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      # test 不再回填 sccache：stable 车道的写入方只有 lint（理由见 lint job 的
+      # test 不再回填 sccache：nightly 车道的写入方只有 lint（理由见 lint job 的
       # 保存步骤）。test 原先那条 `sccache-test-*` 条目从来没活过一轮 ——
       # 实测缓存列表里始终只有一条 7.2 GB 的 sccache 条目 + 两个二进制键。
       # registry（~/.cargo）仍由本 job 回填：它只有几百 MB，是各 job 都要读的那份。
@@ -1244,8 +1249,8 @@ jobs:
           # `cargo build` 报 "no matching package named dioxus-lint-scope"。
           cp -r "$RUNNER_TEMP/rust-specs/support" "$RUNNER_TEMP/support"
 
-      - name: 装 Rust 工具链（stable，算改动面用）
-        uses: dtolnay/rust-toolchain@stable
+      - name: 装 Rust 工具链（仓 rust-toolchain.toml 钉死 nightly-2026-08-20）
+        uses: dtolnay/rust-toolchain@nightly
 
       # ferrite 仓 .cargo/config.toml 配了 rustc-wrapper = sccache；不装的话
       # cargo 调 rustc 直接失败（could not execute process sccache）。
@@ -1268,8 +1273,8 @@ jobs:
       # 12m40s 花在编译 rust-specs 的 20 个 lint 库（clippy_utils 是 git 依赖，
       # 每个 run 从零编一遍）。
       # 写入方与 lint/test 不同：dylint 只在 PR 跑，没有全量 run 替它回填，
-      # 所以这里是自己写自己读（PR 车道即写入方）。角色键独立于 stable 车道 ——
-      # nightly + rustc-dev 编出的产物与 stable 不通用，混用只会互相挤兑
+      # 所以这里是自己写自己读（PR 车道即写入方）。角色键独立于 nightly 车道 ——
+      # nightly + rustc-dev 编出的 dylint 产物与本车道不通用，混用只会互相挤兑
       # 仓库级 10 GB 缓存预算（今天单条 sccache-lint 条目就占 7.2 GB）。
       - name: Cache 依赖（registry，lint 库的 clippy_utils 也走这里）
         uses: actions/cache/restore@v4
@@ -1526,7 +1531,7 @@ jobs:
           sudo install -m755 just /usr/local/bin/just
           just --version
       - name: Install Rust toolchain (cargo xtask structure compiles xtask/check + rust-specs/checks)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
       # ferrite .cargo/config.toml sets rustc-wrapper=sccache; without it
       # `just spec-check` fails to invoke the compiler during xtask build.
       - name: 装 sccache
