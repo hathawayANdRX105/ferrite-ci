@@ -171,9 +171,44 @@ jobs:
           timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang shellcheck
 
       - name: 装 sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
         uses: actions/cache/restore@v4
@@ -587,9 +622,44 @@ jobs:
 
       # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
       - name: 装 sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
         uses: actions/cache/restore@v4
@@ -741,9 +811,44 @@ jobs:
       # rustc-wrapper=sccache（仓根 .cargo/config.toml 钉）：不装则每个 rustc 调用
       # 以 "sccache not found" 失败。check 不链接，故无需 mold/clang（同原私有仓 yml）。
       - name: 装 sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
 
       - name: 移动目标 graph cargo check
         id: check
@@ -914,9 +1019,44 @@ jobs:
 
       - name: 装 sccache
         if: steps.scope.outputs.mode != 'docs-only'
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
         uses: actions/cache/restore@v4
@@ -1255,9 +1395,44 @@ jobs:
       # ferrite 仓 .cargo/config.toml 配了 rustc-wrapper = sccache；不装的话
       # cargo 调 rustc 直接失败（could not execute process sccache）。
       - name: 装 sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
 
       # ferrite .cargo/config.toml 配了 clang + --ld-path=/usr/bin/mold；dylint-link
       # 调 cc 链接时缺 mold 会报 unrecognized command-line option。与 lint-check 同包装。
@@ -1535,9 +1710,44 @@ jobs:
       # ferrite .cargo/config.toml sets rustc-wrapper=sccache; without it
       # `just spec-check` fails to invoke the compiler during xtask build.
       - name: 装 sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.10.0"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
       - name: Checkout rust-specs (public repo, sibling dir + RUST_SPECS_DIR)
         uses: actions/checkout@v4
         with:
