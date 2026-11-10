@@ -569,127 +569,6 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo ">>> 改动面判定: $mode（base=$base）"
 
-      # 同 test job 的「释放 runner 磁盘」（两处逻辑与清单需同步）：恢复 sccache
-      # 缓存时曾写满根分区（No space left on device，ferrite PR #609 复跑）。
-      # 与 test job 同样按 df 余量门控：实测删除要 76s，而 runner 空闲普遍 85G，
-      # 低余量才值得删。删除清单与原先完全一致。
-      - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: |
-          set -euo pipefail
-          free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
-          before="$(free_gib)"
-          # df 输出格式若与预期不符（空 / 带单位 / 非数字），按低余量处理 ——
-          # 删除落在保守侧（这一步原本就是无条件删除）。
-          case "$before" in ''|*[!0-9]*) before=0 ;; esac
-          echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
-          if [ "$before" -ge 60 ]; then
-            echo ">>> 余量充足，跳过释放"
-            exit 0
-          fi
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/share/swift \
-            /usr/local/share/boost \
-            /usr/local/share/powershell \
-            /usr/local/lib/node_modules \
-            /opt/microsoft /opt/google/chrome /usr/local/share/chromium
-          sudo docker image prune -af >/dev/null || true
-          echo ">>> 释放后空闲 $(free_gib) GiB"
-      - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@nightly
-
-      # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
-      # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
-      - name: 装 tauri Linux 依赖
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: |
-          set -euo pipefail
-          timeout 300 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 \
-            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev
-
-      # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
-      - name: 装 mold + clang
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: |
-          set -euo pipefail
-          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
-
-      # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
-      - name: 装 sccache
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
-          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
-          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
-          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
-          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --version
-            exit 0
-          fi
-          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
-          tmpdir="$(mktemp -d)"
-          trap 'rm -rf "$tmpdir"' EXIT
-          ok=0
-          for attempt in 1 2 3 4 5; do
-            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
-              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
-                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
-                if [ -n "$bin" ]; then
-                  sudo install -m755 "$bin" /usr/local/bin/sccache
-                  /usr/local/bin/sccache --version
-                  ok=1
-                  break
-                fi
-              fi
-            fi
-            echo "::warning::sccache install attempt $attempt/5 failed"
-            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
-            sleep $((attempt * 10))
-          done
-          if [ "$ok" != "1" ]; then
-            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          fi
-
-      - name: Cache 依赖（restore-only，写回归写入方 run）
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cargo
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: 计算缓存日键
-        id: cachekey
-        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache sccache 产物（nightly 共享角色，restore-only）
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/sccache
-          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
-          restore-keys: |
-            sccache-nightly-${{ runner.os }}-v0.10.0-
-      - name: 装 Bun（web 样式/WASM 构建链）
-        if: steps.scope.outputs.mode != 'docs-only'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: 装 wasm32 目标
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: rustup target add wasm32-unknown-unknown
-
       - name: 取 base 分支（壳编译判定用）
         run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
 
@@ -732,6 +611,131 @@ jobs:
             echo "root=platforms" >> "$GITHUB_OUTPUT"
             echo "shells=desktop mobile" >> "$GITHUB_OUTPUT"
           fi
+      # 同 test job 的「释放 runner 磁盘」（两处逻辑与清单需同步）：恢复 sccache
+      # 缓存时曾写满根分区（No space left on device，ferrite PR #609 复跑）。
+      # 与 test job 同样按 df 余量门控：实测删除要 76s，而 runner 空闲普遍 85G，
+      # 低余量才值得删。删除清单与原先完全一致。
+      - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
+        if: steps.scope.outputs.mode != 'docs-only'
+        run: |
+          set -euo pipefail
+          free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
+          before="$(free_gib)"
+          # df 输出格式若与预期不符（空 / 带单位 / 非数字），按低余量处理 ——
+          # 删除落在保守侧（这一步原本就是无条件删除）。
+          case "$before" in ''|*[!0-9]*) before=0 ;; esac
+          echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
+          if [ "$before" -ge 60 ]; then
+            echo ">>> 余量充足，跳过释放"
+            exit 0
+          fi
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/local/lib/node_modules \
+            /opt/microsoft /opt/google/chrome /usr/local/share/chromium
+          sudo docker image prune -af >/dev/null || true
+          echo ">>> 释放后空闲 $(free_gib) GiB"
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@nightly
+
+      # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
+      # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
+      - name: 装 tauri Linux 依赖
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          timeout 300 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
+          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
+      - name: 装 mold + clang
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+
+      # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
+      - name: 装 sccache
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
+          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
+          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
+          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
+          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
+              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
+                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
+                if [ -n "$bin" ]; then
+                  sudo install -m755 "$bin" /usr/local/bin/sccache
+                  /usr/local/bin/sccache --version
+                  ok=1
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::sccache install attempt $attempt/5 failed"
+            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache 依赖（restore-only，写回归写入方 run）
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: 计算缓存日键
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        id: cachekey
+        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache sccache 产物（nightly 共享角色，restore-only）
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
+          restore-keys: |
+            sccache-nightly-${{ runner.os }}-v0.10.0-
+      - name: 装 Bun（web 样式/WASM 构建链）
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: 装 wasm32 目标
+        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
+        run: rustup target add wasm32-unknown-unknown
+
 
       # dx 是单文件二进制（dioxus-cli 的 bin，不带数据文件；实测 `ldd` 只链系统库、
       # 直接执行即可），按版本钉缓存：装一次 8m24s（639 个 crate 全量编译，release
