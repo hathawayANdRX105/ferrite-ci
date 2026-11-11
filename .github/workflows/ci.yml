@@ -169,7 +169,12 @@ jobs:
       - name: 装 mold
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/install-linker.sh shellcheck
+        run: |
+          set -euo pipefail
+          # 本 workflow 在壳仓，这里检出的是私有主仓：助手脚本从壳仓取。
+          gh api repos/hathawayANdRX105/ferrite-ci/contents/.github/scripts/install-linker.sh \
+            --jq .content | base64 -d > /tmp/install-linker.sh
+          bash /tmp/install-linker.sh shellcheck
 
       - name: 装 sccache
         env:
@@ -663,7 +668,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           APT_TIMEOUT: '300'
-        run: bash .github/scripts/install-linker.sh
+        run: |
+          set -euo pipefail
+          # 本 workflow 在壳仓，这里检出的是私有主仓：助手脚本从壳仓取。
+          gh api repos/hathawayANdRX105/ferrite-ci/contents/.github/scripts/install-linker.sh \
+            --jq .content | base64 -d > /tmp/install-linker.sh
+          bash /tmp/install-linker.sh
 
       # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
       - name: 装 sccache
@@ -1022,7 +1032,12 @@ jobs:
         # .github/scripts/install-linker.sh 的 release 二进制兜底继续。
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/install-linker.sh
+        run: |
+          set -euo pipefail
+          # 本 workflow 在壳仓，这里检出的是私有主仓：助手脚本从壳仓取。
+          gh api repos/hathawayANdRX105/ferrite-ci/contents/.github/scripts/install-linker.sh \
+            --jq .content | base64 -d > /tmp/install-linker.sh
+          bash /tmp/install-linker.sh
 
       - name: 装 sccache
         if: steps.scope.outputs.mode != 'docs-only'
@@ -1446,7 +1461,12 @@ jobs:
       - name: 装 mold
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/install-linker.sh
+        run: |
+          set -euo pipefail
+          # 本 workflow 在壳仓，这里检出的是私有主仓：助手脚本从壳仓取。
+          gh api repos/hathawayANdRX105/ferrite-ci/contents/.github/scripts/install-linker.sh \
+            --jq .content | base64 -d > /tmp/install-linker.sh
+          bash /tmp/install-linker.sh
 
       # ── 缓存面 ────────────────────────────────────────────────────────────
       # 本 job 此前**一条缓存都没有**：实测 run 41602562540 的 sccache 统计是
