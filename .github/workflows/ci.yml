@@ -163,12 +163,13 @@ jobs:
       - name: Rust 工具链
         uses: dtolnay/rust-toolchain@nightly
 
-      # ui-components 契约测试要真实链接，mold 不可省；apt 加固同 test 关卡。
+      # ui-components 契约测试要真实链接，mold 不可省。apt 镜像成段时间整段挂死过
+      #（archive.ubuntu.com 故障越过重试直接超时），装不上时脚本改走上游 release
+      # 二进制兜底（.github/scripts/install-linker.sh），不再把整个 job 拖死在这一步。
       - name: 装 mold
-        run: |
-          set -euo pipefail
-          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang shellcheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/install-linker.sh shellcheck
 
       - name: 装 sccache
         env:
@@ -656,11 +657,13 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev
 
       # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
+      # apt 挂了走 release 二进制兜底（同上，install-linker.sh 自带 update 重试）。
       - name: 装 mold + clang
         if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APT_TIMEOUT: '300'
+        run: bash .github/scripts/install-linker.sh
 
       # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
       - name: 装 sccache
@@ -1015,11 +1018,11 @@ jobs:
 
       - name: 装 mold
         if: steps.scope.outputs.mode != 'docs-only'
-        # apt 镜像曾整段挂死到 job 超时；显式重试 + 硬超时，让故障快速失败可重跑。
-        run: |
-          set -euo pipefail
-          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+        # apt 镜像曾整段挂死到 job 超时；显式重试 + 硬超时，装不上则按
+        # .github/scripts/install-linker.sh 的 release 二进制兜底继续。
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/install-linker.sh
 
       - name: 装 sccache
         if: steps.scope.outputs.mode != 'docs-only'
@@ -1441,10 +1444,9 @@ jobs:
       # ferrite .cargo/config.toml 配了 clang + --ld-path=/usr/bin/mold；dylint-link
       # 调 cc 链接时缺 mold 会报 unrecognized command-line option。与 lint-check 同包装。
       - name: 装 mold
-        run: |
-          set -euo pipefail
-          timeout 240 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 240 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 mold clang
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/install-linker.sh
 
       # ── 缓存面 ────────────────────────────────────────────────────────────
       # 本 job 此前**一条缓存都没有**：实测 run 41602562540 的 sccache 统计是
