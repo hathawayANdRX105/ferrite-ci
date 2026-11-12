@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -217,7 +217,7 @@ jobs:
           fi
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -233,7 +233,7 @@ jobs:
       # 工具链换 pinned nightly 后编译器版本变了，旧 stable-key 缓存按编译器版本
       # 分桶本来也不会命中，直接换键名保持口径一致。
       - name: Cache sccache 产物（nightly 共享角色，restore-only）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -506,7 +506,7 @@ jobs:
       # always()：失败 run 的编译产物同样有复用价值。
       - name: 回填 cargo 缓存（仅写入方）
         if: always() && (inputs.pr == '' || inputs.full == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -520,7 +520,7 @@ jobs:
       # ≈ 8 GB，留出余量；日键轮换后旧条目不再被命中，自然落到 LRU 末尾被淘汰。
       - name: 回填 sccache 缓存（nightly 共享角色，日键，仅 lint 写）
         if: always() && (inputs.pr == '' || inputs.full == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/sccache
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -540,7 +540,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -719,7 +719,7 @@ jobs:
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
         if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -733,7 +733,7 @@ jobs:
 
       - name: Cache sccache 产物（nightly 共享角色，restore-only）
         if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -760,7 +760,7 @@ jobs:
         # 只有 apps 世代调 `dx build`（platforms 世代只跑 cargo check），
         # 别在旧布局上白装一次 dx。
         if: steps.shells.outputs.changed == 'true' && steps.shells.outputs.root == 'apps'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/dx
           key: dioxus-cli-${{ runner.os }}-${{ runner.arch }}-0.7.10
@@ -812,7 +812,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -942,7 +942,7 @@ jobs:
       FERRITE_E2E_DATABASE_URL: postgres://ferrite:ferrite@localhost:5432/ferrite
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -1081,7 +1081,7 @@ jobs:
           fi
 
       - name: Cache 依赖（restore-only，写回归写入方 run）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -1093,7 +1093,7 @@ jobs:
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache sccache 产物（nightly 共享角色，restore-only）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -1105,7 +1105,7 @@ jobs:
       # 二进制约 12M，缓存它省一次下载；升级 nextest 时同步改 v1。
       - name: Cache nextest 二进制
         id: nextest-bin
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-nextest
           key: nextest-bin-${{ runner.os }}-v1
@@ -1123,7 +1123,7 @@ jobs:
       - name: Cache testless 二进制
         id: testless-bin
         if: inputs.pr != '' && inputs.full != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/testless
           key: testless-bin-${{ runner.os }}-v1
@@ -1156,7 +1156,7 @@ jobs:
 
       - name: 回填 cargo 缓存（仅写入方）
         if: always() && (inputs.pr == '' || inputs.full == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -1178,7 +1178,7 @@ jobs:
       # 检出失败不阻断回写：回写状态比描述好看更重要，判定拿不到就按 full 描述。
       - name: 检出私有源码（判定 docs-only 用）
         continue-on-error: true
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -1242,7 +1242,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 检出 rust-specs（公开仓）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: hathawayANdRX105/rust-specs
           ref: main
@@ -1318,7 +1318,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -1326,7 +1326,7 @@ jobs:
           fetch-depth: 0
 
       - name: 检出 rust-specs（公开仓）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: hathawayANdRX105/rust-specs
           ref: main
@@ -1478,7 +1478,7 @@ jobs:
       # nightly + rustc-dev 编出的 dylint 产物与本车道不通用，混用只会互相挤兑
       # 仓库级 10 GB 缓存预算（今天单条 sccache-lint 条目就占 7.2 GB）。
       - name: Cache 依赖（registry，lint 库的 clippy_utils 也走这里）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -1490,7 +1490,7 @@ jobs:
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache sccache 产物（dylint 角色）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-dylint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -1502,7 +1502,7 @@ jobs:
       # 版本错配会让 rustc 加载 lint 库直接失败。升级 cargo-dylint 时 bump v1。
       - name: Cache dylint 工具二进制
         id: dylint-bin
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-dylint
@@ -1671,7 +1671,7 @@ jobs:
       - name: 回填 sccache 缓存（dylint 角色，日键）
         if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/sccache
           key: sccache-dylint-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -1705,7 +1705,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout private source (PAT)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.sha }}
@@ -1775,7 +1775,7 @@ jobs:
             echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           fi
       - name: Checkout rust-specs (public repo, sibling dir + RUST_SPECS_DIR)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: hathawayANdRX105/rust-specs
           ref: main
