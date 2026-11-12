@@ -76,7 +76,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: 检出私有源码（PAT）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.PRIVATE_REPO }}
           ref: ${{ inputs.ref }}
@@ -99,7 +99,7 @@ jobs:
           version: "v0.10.0"
 
       - name: Cache 依赖（restore-only，写回归写入方 ci run）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -111,7 +111,7 @@ jobs:
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache sccache 产物（release 角色，restore-only 回退到 test/lint 日键）
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-release-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
@@ -435,7 +435,7 @@ jobs:
 
       - name: 回填 sccache 缓存（release 角色，日键）
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/sccache
           key: sccache-release-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
