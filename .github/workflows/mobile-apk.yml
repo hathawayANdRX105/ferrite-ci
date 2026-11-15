@@ -1,0 +1,147 @@
+# 移动端打包实验（Capacitor → Android debug APK）。
+#
+# 与 ci.yml / release.yml 分开：这条线只在一个 spike 分支上按需手动跑，不进
+# shell-ci 合并门，不占用任何 gate 语义。产物是 debug 签名 APK（可直接侧载），
+# 上传为 workflow artifact；不发布到 Release（避免把内部管理台 UI 挂成公开资产）。
+#
+# 用法：
+#   gh workflow run mobile-apk.yml -R hathawayANdRX105/ferrite-ci \
+#     -f sha=<ferrite commit sha> -f api_origin=<gateway url, 可空>
+#   gh run watch <run-id> -R hathawayANdRX105/ferrite-ci
+#
+# 为什么不在本机跑：Capacitor 8 的 Android 工程要 Gradle 8.14 + AGP 8.13 +
+# JDK 21 + Android SDK 36，本机只有 JDK 27（Gradle 8.14 不支持）且 SDK 缺失，
+# runner 上这些都是预装/秒装的。
+
+name: mobile-apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'ferrite commit SHA（要打包的前端提交）'
+        required: true
+      api_origin:
+        description: 'VITE_API_ORIGIN（原生壳访问的 gateway，如 https://gw.example.com；空 = 相对 /api）'
+        required: false
+        default: ''
+      artifact_suffix:
+        description: '产物名后缀（便于区分多次实验）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-apk-${{ inputs.sha }}
+  cancel-in-progress: true
+
+env:
+  PRIVATE_REPO: hathawayANdRX105/ferrite
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出私有源码（PAT）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.FERRITE_PAT }}
+
+      - name: 配 Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 配 Node 24 + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 装 pnpm（版本取自 package.json packageManager）
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: dev/web-svelte/package.json
+
+      - name: 确认 Android SDK 组件
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$sdk_root"
+          ls "$sdk_root/platforms" "$sdk_root/build-tools"
+          # runner 镜像带的 API 版本会落后于 Capacitor 模板（compileSdk 36）；
+          # 缺什么补什么，licenses 在 runner 镜像里已经预先接受。
+          if [ ! -d "$sdk_root/platforms/android-36" ]; then
+            yes | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36"
+          fi
+          if [ ! -d "$sdk_root/build-tools/36.0.0" ]; then
+            yes | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0"
+          fi
+
+      - name: 装前端依赖
+        working-directory: dev/web-svelte
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          # ui-svelte 的裸包解析靠仓库根的 node_modules 链接（ui-svelte 在 dev/web-svelte
+          # 之外，Vite 从源码目录向上找）；干净 worktree 上必须先建这个链接。
+          node scripts/link-check-cache-node-modules.mjs
+
+      - name: 构建 web 产物
+        working-directory: dev/web-svelte
+        env:
+          VITE_API_ORIGIN: ${{ inputs.api_origin }}
+        run: pnpm build
+
+      - name: 同步进 Android 工程
+        working-directory: dev/web-svelte
+        run: npx cap sync android
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('dev/web-svelte/android/**/*.gradle', 'dev/web-svelte/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: 打 debug APK
+        working-directory: dev/web-svelte/android
+        run: |
+          set -euo pipefail
+          ./gradlew assembleDebug --no-daemon --console=plain
+
+      - name: 产物信息
+        id: apk
+        run: |
+          set -euo pipefail
+          src="dev/web-svelte/android/app/build/outputs/apk/debug/app-debug.apk"
+          suffix="${{ inputs.artifact_suffix }}"
+          out="ferrite-console-debug${suffix:+-$suffix}.apk"
+          cp "$src" "$out"
+          ls -lh "$out"
+          sha256sum "$out" | tee "$out.sha256"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$out" | head -5 || true
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-console-debug-${{ inputs.sha }}
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.path }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 结论
+        run: |
+          echo "APK 下载：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "artifact：ferrite-console-debug-${{ inputs.sha }}"
