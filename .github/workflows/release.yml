@@ -275,20 +275,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 装 Bun（移动壳的 tauri-cli 入口）
-        if: inputs.mobile == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Product web bundle prerequisites
-        if: inputs.mobile == 'true'
-        run: |
-          set -euo pipefail
-          if [ -d apps/coder-mobile/web ]; then
-            rustup target add wasm32-unknown-unknown
-            cargo install dioxus-cli --locked --version 0.7.10
-          fi
+      # 原生壳已随主仓删除（harness 出仓后编不过，见 ferrite#757）：移动产物的
+      # wasm/capacitor 打包链不在 release 里构建；bun / wasm32 / dioxus-cli 全部退役。
 
       - name: Android 工具链（SDK / NDK 三变量 / aarch64 target）
         if: inputs.mobile == 'true'
