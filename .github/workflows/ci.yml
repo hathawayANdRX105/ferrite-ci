@@ -228,7 +228,7 @@ jobs:
         id: cachekey
         run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # nightly 车道（lint / test / app-shell）共用**一条** sccache 缓存，见 lint job
+      # nightly 车道（lint / test）共用**一条** sccache 缓存，见 lint job
       # 保存步骤的预算说明：三个角色各写各的会把仓库级 10 GB 预算挤爆。
       # 工具链换 pinned nightly 后编译器版本变了，旧 stable-key 缓存按编译器版本
       # 分桶本来也不会命中，直接换键名保持口径一致。
@@ -480,243 +480,6 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
 
-  # 端上壳编译守卫：apps|platforms/{desktop,mobile} 各自独立 workspace（shell_root 探测双布局），根 Cargo.toml 的 members
-  # 不含它们，clippy --all-targets / just test 都编不到——而两个壳都在**编译期**调
-  # tauri::generate_context!()（读 tauri.conf.json：bundle.icon 缺 RGBA PNG 直接 panic，
-  # 上游 tauri-v2.12.4 context.rs:215-224/479-493 + image.rs:79-85）。实测缺口见 #342：
-  # 桌面壳 bundle.icon 留空 + icons/ 只有 README，本机 cargo check 一编即 panic，
-  # 而 CI 无任何一步编它（apps|platforms/* 不在主 workspace 的依赖图里）。
-  # 本 job 只做 cargo check，不装 Android 工具链：移动壳的 Android 出包由 release.yml
-  # 的 android job 承担（dry-run 可验），这里补的是「改配置/图标就红」的编译级回归网。
-  # mold + clang + sccache 不可省：apps|platforms/*/src-tauri 向上搜索会命中仓根 .cargo/config.toml
-  # （linker=clang、ld-path=mold、rustc-wrapper=sccache），缺任一个都编译不过（spike 实测定论）。
-  app-shell-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: 检出私有源码（PAT）
-        uses: actions/checkout@v7
-        with:
-          repository: ${{ env.PRIVATE_REPO }}
-          ref: ${{ inputs.sha }}
-          token: ${{ secrets.FERRITE_PAT }}
-          fetch-depth: 0
-
-      # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
-      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
-      # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
-      - name: 判定改动面（docs-only 快通道）
-        id: scope
-        run: |
-          set -euo pipefail
-          # 只有 PR 快关可能走 docs-only。全量（main push / 手动 full=true）是合并后的
-          # 安全网，也是 cargo/sccache 缓存的唯一写入方——跳过它等于把 main 的兜底验证
-          # 和缓存回填一起放弃，故一律按 full。
-          if [ -z "${{ inputs.pr }}" ] || [ "${{ inputs.full }}" = "true" ]; then
-            echo ">>> 全量 run（main push / full=true）：不走快通道"
-            echo "mode=full" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-          base="origin/${{ inputs.base }}"
-          # 判定器还没进私有仓 main（它与本 workflow 分仓落地，存在时间差）：
-          # 缺失不是代码问题，按 full 跑，别把三关打红。
-          if [ ! -f scripts/ci-scope.sh ]; then
-            echo ">>> scripts/ci-scope.sh 尚未就位（私有仓未合入），按 full 处理"
-            echo "mode=full" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          mode="$(bash scripts/ci-scope.sh "$base")"
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo ">>> 改动面判定: $mode（base=$base）"
-
-      - name: 取 base 分支（壳编译判定用）
-        run: git fetch --no-tags origin "+refs/heads/${{ inputs.base }}:refs/remotes/origin/${{ inputs.base }}"
-
-      # 端上壳改动面判定：dx 安装与壳编译共用这一次判定。
-      # 原先只有壳编译 step 自己算 diff，dx 安装却按「非 docs-only」无条件跑 ——
-      # apps|platforms 无变更的 run 白付一次 `cargo install dioxus-cli`
-      # （实测 run 41611764593：编译 639 个 crate、8m24s，日志里
-      # `Finished release profile ... in 8m 24s`），随后壳编译 step 才打印
-      # 「apps|platforms 无变更」退出。判定提到前面，环上两个 step 都按它门控。
-      # 保守纪律与壳编译 step 完全一致：拿不到 base 时按「有变更」跑。
-      - name: 判定端上壳改动面
-        id: shells
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: |
-          set -euo pipefail
-          if [ -n "${{ inputs.pr }}" ]; then
-            base="origin/${{ inputs.base }}"
-            git rev-parse --verify -q "$base" >/dev/null || base=""   # 拿不到 base 时保守全量
-          else
-            base="HEAD~1"
-          fi
-          if [ -n "$base" ]; then
-            echo ">>> 判定 merge-base 范围: ${base}...HEAD（仅 apps|platforms/**）"
-            files="$(git diff --name-only "${base}"...HEAD -- apps platforms || true)"
-          else
-            echo ">>> 拿不到 base（分支被删 / force-push），保守全量跑"
-            files="apps platforms"
-          fi
-          if [ -z "$files" ]; then
-            echo "::notice::apps|platforms 无变更，端上壳编译跳过"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          printf '%s\n' "$files" | sed 's/^/  壳变更: /'
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          if [ -d apps/coder-desktop/src-tauri ]; then
-            echo "root=apps" >> "$GITHUB_OUTPUT"
-            echo "shells=coder-desktop coder-mobile" >> "$GITHUB_OUTPUT"
-          else
-            echo "root=platforms" >> "$GITHUB_OUTPUT"
-            echo "shells=desktop mobile" >> "$GITHUB_OUTPUT"
-          fi
-      # 同 test job 的「释放 runner 磁盘」（两处逻辑与清单需同步）：恢复 sccache
-      # 缓存时曾写满根分区（No space left on device，ferrite PR #609 复跑）。
-      # 与 test job 同样按 df 余量门控：实测删除要 76s，而 runner 空闲普遍 85G，
-      # 低余量才值得删。删除清单与原先完全一致。
-      - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
-        if: steps.scope.outputs.mode != 'docs-only'
-        run: |
-          set -euo pipefail
-          free_gib() { df -Bg / | awk 'NR==2 {gsub("G","",$4); print $4}'; }
-          before="$(free_gib)"
-          # df 输出格式若与预期不符（空 / 带单位 / 非数字），按低余量处理 ——
-          # 删除落在保守侧（这一步原本就是无条件删除）。
-          case "$before" in ''|*[!0-9]*) before=0 ;; esac
-          echo ">>> 根分区空闲 ${before} GiB（阈值 60）"
-          if [ "$before" -ge 60 ]; then
-            echo ">>> 余量充足，跳过释放"
-            exit 0
-          fi
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/share/swift \
-            /usr/local/share/boost \
-            /usr/local/share/powershell \
-            /usr/local/lib/node_modules \
-            /opt/microsoft /opt/google/chrome /usr/local/share/chromium
-          sudo docker image prune -af >/dev/null || true
-          echo ">>> 释放后空闲 $(free_gib) GiB"
-      - name: Rust 工具链
-        uses: dtolnay/rust-toolchain@nightly
-
-      # tauri v2 在 Linux 的构建前置（tauri 官方 prerequisite）：webkit2gtk-sys 的
-      # build.rs 用 pkg-config 找它们，cargo check 阶段就要，不能拖到真打包。
-      - name: 装 tauri Linux 依赖
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          timeout 300 sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15
-          timeout 300 sudo apt-get install -y -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=15 \
-            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev
-
-      # 仓根 .cargo/config.toml 的 linker=clang + ld-path=mold（jobs=6 本机现算）。
-      # apt 挂了走 release 二进制兜底（同上，install-linker.sh 自带 update 重试）。
-      - name: 装 mold + clang
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APT_TIMEOUT: '300'
-        run: |
-          set -euo pipefail
-          # 本 workflow 在壳仓，这里检出的是私有主仓：助手脚本从壳仓取。
-          gh api repos/hathawayANdRX105/ferrite-ci/contents/.github/scripts/install-linker.sh \
-            --jq .content | base64 -d > /tmp/install-linker.sh
-          bash /tmp/install-linker.sh
-
-      # rustc-wrapper=sccache：不装则每个 rustc 调用以 "sccache not found" 失败。
-      - name: 装 sccache
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # GitHub-hosted runner 是无状态的：每次 job 都要重新装 sccache 二进制。
-          # 而二进制托管在 GitHub releases，release CDN 偶发 504 时原 action
-          # 只重试两三次就失败，把 4 个 job 一起拖死。这里改用 gh release download
-          # （走带鉴权的 API 路径）+ 5 次退避重试；全部失败时不再让 job 红灯，
-          # 而是取消 rustc-wrapper，退化为无编译缓存的直编——慢，但 CI 可继续。
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --version
-            exit 0
-          fi
-          asset="sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz"
-          tmpdir="$(mktemp -d)"
-          trap 'rm -rf "$tmpdir"' EXIT
-          ok=0
-          for attempt in 1 2 3 4 5; do
-            if gh release download v0.10.0 -R mozilla/sccache -p "$asset" -D "$tmpdir" --clobber >/tmp/sccache-dl.log 2>&1; then
-              if tar -xzf "$tmpdir/$asset" -C "$tmpdir" >/tmp/sccache-extract.log 2>&1; then
-                bin="$(find "$tmpdir" -type f -name sccache -perm -111 | head -n1)"
-                if [ -n "$bin" ]; then
-                  sudo install -m755 "$bin" /usr/local/bin/sccache
-                  /usr/local/bin/sccache --version
-                  ok=1
-                  break
-                fi
-              fi
-            fi
-            echo "::warning::sccache install attempt $attempt/5 failed"
-            cat /tmp/sccache-dl.log /tmp/sccache-extract.log 2>/dev/null || true
-            sleep $((attempt * 10))
-          done
-          if [ "$ok" != "1" ]; then
-            echo "::warning::sccache could not be installed from GitHub releases; disabling rustc-wrapper for this job (builds run uncached)."
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          fi
-
-      - name: Cache 依赖（restore-only，写回归写入方 run）
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        uses: actions/cache/restore@v6
-        with:
-          path: ~/.cargo
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: 计算缓存日键
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        id: cachekey
-        run: echo "d=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache sccache 产物（nightly 共享角色，restore-only）
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        uses: actions/cache/restore@v6
-        with:
-          path: ~/.cache/sccache
-          key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
-          restore-keys: |
-            sccache-nightly-${{ runner.os }}-v0.10.0-
-      # 前端已替换为 Svelte（主仓 #729 / #752）：端上壳不再嵌 Dioxus wasm 包——
-      # bun / wasm32 目标 / dioxus-cli 全部退役，壳的前端产物由各壳自己的
-      # Svelte 打包链（dist/）交付，不在壳仓 CI 里构建。
-
-
-      - name: 端上壳 cargo check（diff 门禁）
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          shell_root="${{ steps.shells.outputs.root }}"
-          shells="${{ steps.shells.outputs.shells }}"
-          for shell in $shells; do
-            dir="${shell_root}/${shell}/src-tauri"
-            if [ ! -d "$dir" ]; then
-              echo "missing native shell dir: $dir" >&2
-              exit 1
-            fi
-            echo ">>> cargo check ${shell} (${dir})"
-            (cd "$dir" && cargo check)
-          done
-          echo ">>> 端上壳编译守卫通过"
-
   # 移动目标 graph 守卫：coding-harness-graph 是纯 Rust（petgraph，无 C 依赖 / build.rs），
   # cargo check（不链接）证明它在 aarch64-linux-android / aarch64-apple-ios 两个移动目标上
   # 类型检查通过——回答「移动壳能不能带上 graph」。两个目标都在 ubuntu-latest 跑：纯 Rust
@@ -902,7 +665,7 @@ jobs:
       # ubuntu runner 空闲普遍 85G（删完 117G）——绝大多数 run 白等两分钟。
       # ENOSPC（PR #609）发生在低余量的 runner 上，所以判据用 df 余量而不是
       # 无条件删除：低于 60 GiB 才清（留量覆盖 sccache 还原 7G + 全仓测试构建
-      # ~25G + postgres 容器）。app-shell-check 有同一步，两处需同步。
+      # ~25G + postgres 容器）。
       # 删除清单与原先完全一致；正在运行的 postgres service 容器其镜像不会被 prune。
       - name: 释放 runner 磁盘（余量不足才删本 job 不用的预装工具链）
         if: steps.scope.outputs.mode != 'docs-only'
@@ -1089,7 +852,7 @@ jobs:
 
   # 聚合两关卡结果，写 commit status `shell-ci` 回主仓：落点 = status_sha（空则回退 sha）。
   report:
-    needs: [lint-check, test, app-shell-check, rust-specs-dylint]
+    needs: [lint-check, test, rust-specs-dylint]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1127,12 +890,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FERRITE_PAT }}
           # cancelled ≠ failure：被并发组取消不代表代码有问题，回写 pending 表示等待重派/手动补派，不能折成红（GH commit status 接受 pending）。
-          # app-shell-check 无 job 级 if（跳过在 step 内做 notice exit 0），不会被 skipped；
-          # cancelled 与另两关同口径折成 pending，让重派后能重新回写。
           # rust-specs-dylint 只在 PR 跑（job 级 if: inputs.pr != ''），全量跑时为 skipped；
           # skipped 不算失败，与「无 Rust 改动」同口径。
-          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && needs.app-shell-check.result == 'success' && (needs.rust-specs-dylint.result == 'success' || needs.rust-specs-dylint.result == 'skipped') && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled' || needs.app-shell-check.result == 'cancelled') && 'pending') || 'failure' }}"
-          DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, app-shell {4}, rust-specs {5}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.app-shell-check.result, needs.rust-specs-dylint.result) }}"
+          STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && (needs.rust-specs-dylint.result == 'success' || needs.rust-specs-dylint.result == 'skipped') && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled') && 'pending') || 'failure' }}"
+          DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, rust-specs {4}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.rust-specs-dylint.result) }}"
           # 快关与全量写**不同的 context**：`shell-ci` 是合并门（主仓 .agent/rules/testing-ci.md
           # 只认这个名字），`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
           # 同一个 head commit 上两条 run 抢同一个状态槽、谁后跑完谁覆盖谁，全量红会把合并门
