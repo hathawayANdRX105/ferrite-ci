@@ -694,35 +694,10 @@ jobs:
           key: sccache-nightly-${{ runner.os }}-v0.10.0-${{ steps.cachekey.outputs.d }}
           restore-keys: |
             sccache-nightly-${{ runner.os }}-v0.10.0-
-      - name: 装 Bun（web 样式/WASM 构建链）
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      # 前端已替换为 Svelte（主仓 #729 / #752）：端上壳不再嵌 Dioxus wasm 包——
+      # bun / wasm32 目标 / dioxus-cli 全部退役，壳的前端产物由各壳自己的
+      # Svelte 打包链（dist/）交付，不在壳仓 CI 里构建。
 
-      - name: 装 wasm32 目标
-        if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
-        run: rustup target add wasm32-unknown-unknown
-
-
-      # dx 是单文件二进制（dioxus-cli 的 bin，不带数据文件；实测 `ldd` 只链系统库、
-      # 直接执行即可），按版本钉缓存：装一次 8m24s（639 个 crate 全量编译，release
-      # 车道的独有产物 sccache 命中不了），命中缓存后只剩一次 tar 解包。
-      # 键里带版本 —— 升级 dioxus-cli 时必须同步改这里（与 nextest/testless 的 v1
-      # 键同一纪律）。
-      - name: Cache Dioxus CLI
-        id: dx-bin
-        # 只有 apps 世代调 `dx build`（platforms 世代只跑 cargo check），
-        # 别在旧布局上白装一次 dx。
-        if: steps.shells.outputs.changed == 'true' && steps.shells.outputs.root == 'apps'
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/bin/dx
-          key: dioxus-cli-${{ runner.os }}-${{ runner.arch }}-0.7.10
-
-      - name: 装 Dioxus CLI（缓存命中则跳过）
-        if: steps.shells.outputs.changed == 'true' && steps.shells.outputs.root == 'apps' && steps.dx-bin.outputs.cache-hit != 'true'
-        run: cargo install dioxus-cli --locked --version 0.7.10
 
       - name: 端上壳 cargo check（diff 门禁）
         if: steps.scope.outputs.mode != 'docs-only' && steps.shells.outputs.changed == 'true'
@@ -736,15 +711,6 @@ jobs:
             if [ ! -d "$dir" ]; then
               echo "missing native shell dir: $dir" >&2
               exit 1
-            fi
-            if [ "$shell_root" = "apps" ]; then
-              web_dir="apps/${shell}/web"
-              if [ ! -d "$web_dir" ]; then
-                echo "missing web entry dir: $web_dir" >&2
-                exit 1
-              fi
-              echo ">>> building WASM bundle for ${shell} (${web_dir})"
-              (cd "$web_dir" && bun install --frozen-lockfile && bun run css && RUSTC_WRAPPER='' dx build --release)
             fi
             echo ">>> cargo check ${shell} (${dir})"
             (cd "$dir" && cargo check)
