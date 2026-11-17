@@ -1,10 +1,10 @@
 # ferrite 公开壳仓 CI：源码在私有主仓（地址只在下方 PRIVATE_REPO env 出现），由主仓 ci-dispatch 触发。
 # lint 与 test 并行；test 关卡启动 PostgreSQL，数据库测试真实执行。
 # PR（pr 入参非空）走 testless 快关，main push / 手动 full=true 走全量。
-# 回写主仓的 commit status 按关卡分流两个 context：快关 `shell-ci`（= 合并门，主仓
-# .agent/rules/testing-ci.md 只认它），全量 `shell-ci-full`（合并后异步、不阻塞、不进合并门）。
+# 回写主仓的 commit status 按关卡分流两个 context：快关 `shell-ci`（= 合并门），
+# 全量 `shell-ci-full`（合并后异步、不阻塞、不进合并门）。
 # 描述里的 "(full)" 标记保留供人眼辨认；真正的区分靠 context 名，不靠描述文字。
-# 缓存与用法详见 .github/README.md。
+# 缓存与用法见本仓 .github/ 目录。
 
 name: ci
 
@@ -66,7 +66,7 @@ jobs:
           fetch-depth: 0
 
       # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
-      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
+      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh，
       # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
       - name: 判定改动面（docs-only 快通道）
         id: scope
@@ -404,59 +404,6 @@ jobs:
           # Same parameters as main repo's `just lint-shell`. Note: the local `bun x shellcheck` fallback does not emit note level, so results are not fully equivalent.
           shellcheck --severity=style --format=gcc "${real[@]}"
 
-      # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-loop 的
-      # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册。
-      #
-      # 门控理由的演进：早先它**无条件跑死**，依据是「testless 的 seed 只来自 Rust 文件，
-      # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main」。那条对 testless 成立，
-      # 但路径检查直接看得见 .md —— 改由 ci-scope-flags.sh 的 `rules` 开关门控，
-      # 只在本轮 diff 真碰 `.agent/rules/**` 或 `crates/harness-agent-loop/src/prompts/**` 时跑。
-      # 安全边界与先前一致：`rules` 的保守值是 true（脚本缺席 / 拿不到 base 一律跑），
-      # 且它的触发面正是这条守卫唯一会红的两处。
-      #
-      # 位置与上面的 shell 闸门同理放在 fmt/clippy 之后：步骤一红，后面的步骤全被 skipped。
-      # 它是本 job 首次 codegen + 链接 harness-agent-loop 的 dev-dep tools（ast-grep + tree-sitter
-      # C 语法 + host 侧 db/turso），构建量级高于 db 守卫，故给 15 分钟（同 ui-kit 契约测试）。
-      # 实测代价：run 39212811029 里这一步 102s，而多数 PR 的 diff 碰不到它的触发面。
-      # 规范文档工具名守卫（无 PG、无 wasm 可跑）：`.agent/rules/*.md` 与 harness-agent-loop 的
-      # prompts 片段里，cg_/sem_ 前缀的工具名必须都已注册。
-      #
-      # 门控理由的演进：早先它**无条件跑死**，依据是「testless 的 seed 只来自 Rust 文件，
-      # 纯 .md 改名会让快关零用例空跑、绿着把漂移合进 main」。那条对 testless 成立，
-      # 但路径检查直接看得见 .md —— 改由 ci-scope-flags.sh 的 `rules` 开关门控，
-      # 只在本轮 diff 真碰 `.agent/rules/**` 或 `crates/harness-agent-loop/src/prompts/**` 时跑。
-      # 安全边界与先前一致：`rules` 的保守值是 true（脚本缺席 / 拿不到 base 一律跑），
-      # 且它的触发面正是这条守卫唯一会红的两处。
-      #
-      # 位置与上面的 shell 闸门同理放在 fmt/clippy 之后：步骤一红，后面的步骤全被 skipped。
-      # 它是本 job 首次 codegen + 链接 harness-agent-loop 的 dev-dep tools（ast-grep + tree-sitter
-      # C 语法 + host 侧 db/turso），构建量级高于 db 守卫，故给 15 分钟（同 ui-kit 契约测试）。
-      # 实测代价：run 39212811029 里这一步 102s，而多数 PR 的 diff 碰不到它的触发面。
-      #
-      # 目标包世代自适应（同 ui-kit / db 迁移守卫的时序耦合病）：#629 把 product entries 拆到
-      # apps/ 后，coder-tools 与它的 tool_selection_tests 都已就位，但 PR 542 的头提交处于
-      # 拆分**之前**（fa783a3 是 #629 合并前的旧 main），`-p coder-tools` 在那棵树上
-      # `did not match any packages`，整个 lint job 被 101 带红（本仓 PR 59 的验证 run
-      # 41657857741 实测）。问 cargo metadata 要真名，两个世代都不在树上才显式跳过。
-      - name: 规范文档工具名守卫
-        if: steps.flags.outputs.rules == 'true'
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          # 拥有者随世代移动（#629 前后各住一个包），且**目标名随世代改名**：
-          # 旧世代包叫 harness-agent-prompts，新世代测试文件挪进 coder-tools 后
-          # 名字不变 —— 但 cargo 的 --test 按目标名匹配，必须问 metadata 要真身，
-          # 硬编码任一世代都会把另一世代带红（run 41657857741 / 41660998543 实测：
-          # 旧树报 `did not match any packages`，新树报 `no test target named`）。
-          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '
-            [.packages[] | select(any(.targets[]; .name == "tool_selection_tests")) | .name] | first // empty')
-          if [ -z "$PKG" ]; then
-            echo ">>> 树上没有拥有 tool_selection_tests 的包；跳过"
-            exit 0
-          fi
-          echo "tool-name guard: package = $PKG"
-          cargo test -p "$PKG" --test tool_selection_tests --profile ci
-
       # 写入方 run（main push / full=true）结束后回填；键已存在则自动 no-op。
       # always()：失败 run 的编译产物同样有复用价值。
       - name: 回填 cargo 缓存（仅写入方）
@@ -634,7 +581,7 @@ jobs:
           fetch-depth: 0
 
       # 改动面判定（docs-only 快通道）：本次 diff 没碰编译面时跳过本 job 的重活，
-      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh（与 wasm-check.sh 同源），
+      # 只留便宜守卫。判定器在私有仓 scripts/ci-scope.sh，
       # 拿不到 diff 一律回落 full——判定错的代价是慢，漏判的代价是 CI 假绿。
       - name: 判定改动面（docs-only 快通道）
         id: scope
@@ -894,8 +841,7 @@ jobs:
           # skipped 不算失败，与「无 Rust 改动」同口径。
           STATE: "${{ (needs.lint-check.result == 'success' && needs.test.result == 'success' && (needs.rust-specs-dylint.result == 'success' || needs.rust-specs-dylint.result == 'skipped') && 'success') || ((needs.lint-check.result == 'cancelled' || needs.test.result == 'cancelled') && 'pending') || 'failure' }}"
           DESC: "${{ format('ferrite-ci{0}{1}: lint {2}, test {3}, rust-specs {4}', inputs.full == 'true' && ' (full)' || '', steps.scope.outputs.mode == 'docs-only' && ' (docs-only)' || '', needs.lint-check.result, needs.test.result, needs.rust-specs-dylint.result) }}"
-          # 快关与全量写**不同的 context**：`shell-ci` 是合并门（主仓 .agent/rules/testing-ci.md
-          # 只认这个名字），`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
+          # 快关与全量写**不同的 context**：`shell-ci` 是合并门，`shell-ci-full` 是合并后异步跑的全量。此前两者共用 `shell-ci`，
           # 同一个 head commit 上两条 run 抢同一个状态槽、谁后跑完谁覆盖谁，全量红会把合并门
           # 的绿顶掉（或反过来），`gh pr checks` 也分不清看到的是哪一关。
           CONTEXT: "${{ inputs.full == 'true' && 'shell-ci-full' || 'shell-ci' }}"
