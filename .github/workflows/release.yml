@@ -6,9 +6,10 @@
 #   tag 非空 且 dry_run=false → 两侧 Release 同步（缺失则创建，已存在则 clobber 资产并对齐 notes）
 #   tag 为空 或 dry_run=true  → 只编译打包验证，产物随 runner 销毁
 #
-# 发布配方（单一来源）：优先读被发版 ref 的 deploy/compose.yml 末尾 x-release 块——
-# Dockerfile 路径、形态、cargo 开关、tarball 包名与镜像坐标都来自主仓 deploy/ 树
-# （目录与 apps/server/{api,web} 一一对位，见主仓 deploy/README.md）；本仓不再
+# 发布配方（单一来源）：优先读被发版 ref 的 compose.yml 末尾 x-release 块——
+# Dockerfile 路径、形态、cargo 开关、tarball 包名与镜像坐标都来自主仓 .github/deploy/ 树
+# （目录与 apps/server/{api,web} 一一对位，见主仓 .github/deploy/README.md）。
+# deploy/compose.yml（2026-11-17 之前的 tag）仍兼容；本仓不再
 # 自持第一份路径。老 ref 无该块时回退本仓世代探测（行为不变）：
 #   三形态世代（ferrite-{local,tavern,server} 别名存在时）：三条各自
 #     --no-default-features --features <别名>，三份 tarball 与三个 api 镜像 tag
@@ -124,17 +125,22 @@ jobs:
         id: recipe
         run: |
           set -euo pipefail
-          # 发布构建配方的单一来源 = 被发版 ref 的 deploy/compose.yml 末尾 x-release 块
-          # （见主仓 deploy/README.md）。compose config 只做解析插值、不起容器；文件里的
-          # 必填变量插值用哑值满足。老 ref 无该块 → 回退本仓世代探测：问 cargo metadata
+          # 发布构建配方的单一来源 = 被发版 ref 的 compose.yml 末尾 x-release 块
+          # （见主仓 .github/deploy/README.md）。compose config 只做解析插值、不起容器；文件里的
+          # 必填变量插值用哑值满足。路径双探：新位置 .github/deploy/，老 tag 的 deploy/。
+          # 老 ref 两处都无该块 → 回退本仓世代探测：问 cargo metadata
           # 的 features 真身（同 ci.yml 的世代自适应风格），配方字段取旧世代等价值。
           RECIPE=""
-          if [ -f deploy/compose.yml ]; then
-            RECIPE=$(FERRITE_JWT_SECRET=recip-parse docker compose -f deploy/compose.yml config --format json 2>/dev/null \
+          COMPOSE_FILE=""
+          for p in .github/deploy/compose.yml deploy/compose.yml; do
+            if [ -f "$p" ]; then COMPOSE_FILE="$p"; break; fi
+          done
+          if [ -n "$COMPOSE_FILE" ]; then
+            RECIPE=$(FERRITE_JWT_SECRET=recip-parse docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null \
               | jq -c '."x-release" // empty') || RECIPE=""
           fi
           if [ -n "$RECIPE" ]; then
-            echo '>>> 发布配方：deploy/compose.yml x-release'
+            echo ">>> 发布配方：$COMPOSE_FILE x-release"
             # 块存在但字段缺失是发布配置错误，宁可炸也不静默回退（配方漂移必须响）。
             jq -e 'has("form") and has("bin_pkg") and has("api_features")
                    and has("dockerfile_api") and has("dockerfile_web")
