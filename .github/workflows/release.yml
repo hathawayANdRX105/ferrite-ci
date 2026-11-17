@@ -8,7 +8,7 @@
 #
 # 发布配方（单一来源）：优先读被发版 ref 的 compose.yml 末尾 x-release 块——
 # Dockerfile 路径、形态、cargo 开关、tarball 包名与镜像坐标都来自主仓 .github/deploy/ 树
-# （目录与 apps/server/{api,web} 一一对位，见主仓 .github/deploy/README.md）。
+# （目录与 apps/server/api 一一对位，见主仓 .github/deploy/README.md）。
 # deploy/compose.yml（2026-11-17 之前的 tag）仍兼容；本仓不再
 # 自持第一份路径。老 ref 无该块时回退本仓世代探测（行为不变）：
 #   三形态世代（ferrite-{local,tavern,server} 别名存在时）：三条各自
@@ -16,24 +16,8 @@
 #     （local/tavern 用形态名，server 用 :latest）。
 #   单形态世代（别名收敛后）：只出 server，default 特性构建（= 完整产品）。
 # 各形态共用同一 tag、同一 release notes，notes 不按形态分裂。
-# 移动壳（apps|platforms/mobile，shell_root 探测双布局）恒随同一 tag 出一份 Android debug APK：
-#   ferrite-mobile-<版本段>.apk（universal、未 strip，体积大属预期）。
-#   用 debug 签名（免 keystore）——正式签名与产物分发口径由维护者另行裁决；
-#   命令序列取自 W6 spike 的实测配方（todo/w6-spike/README.md §C/§F 同口径），
-#   与形态二进制同一 job：不做 artifact 传递（保持「Actions artifact 恒为 0」），
-#   构建失败即整条发布失败（原子性：要么全发要么不发）。
-#
-# 版本快照（2026-10-17 壳仓实测，spike run 39013969883 / 39014614301；三处浮点已锁）：
-#   apps|platforms/desktop|mobile/package.json  @tauri-apps/cli = 2.12.3（exact，原 ^2.11.5）
-#   apps|platforms/*/src-tauri/Cargo.toml      tauri = 2.12.4 / tauri-build = 2.7.3（两条版本线，
-#                                   均为 exact；原均为 "2" caret）——取值来自壳仓绿 run
-#                                   39013969883 的实编译日志（tauri v2.12.4 + tauri-build v2.7.3）；
-#                                   写同一个号会在依赖解析期直接失败（ferrite #345 撞过）
-#   tauri-cli 2.12.3 生成的 Android 模板栈（随 CLI 换代，升级须同步此快照）：
-#     Gradle 9.6.1 / AGP 9.3.1 / Kotlin 2.2.10 / compileSdk 37 /
-#     runner 预装 NDK 29.0.14206865（本 job 显式选版本） / JDK 17（AGP 9.x 最低）
-#   注意：第一阶段 §2 记的 2.11.5 时代模板数据（Gradle 8.14.3 / AGP 8.11.0 /
-#   Kotlin 1.9.25 / SDK 36）已过时——那份快照来自旧 CLI 模板常量，勿照抄。
+# 移动壳已随主仓删除（ferrite #757：原生 Tauri 壳在 harness 出仓后编不过）：
+# Android APK 不再随 release 产出；移动重打包链由主仓 Svelte 世代另行决定。
 name: release
 
 on:
@@ -50,10 +34,6 @@ on:
         description: 'true = 只编译打包，不创建 Release'
         required: false
         default: 'false'
-      mobile:
-        description: 'true = 附带构建 Android debug APK；false = 只发形态二进制'
-        required: false
-        default: 'true'
 
 # contents: write 仅为发布到本壳仓自身（github.token 只覆盖本仓）；主仓仍走 FERRITE_PAT。
 # token 不自动注入 env，仅下方发布步骤显式引用，构建步骤拿不到。
@@ -246,12 +226,8 @@ jobs:
             section "Removed"          '^revert(\([^)]*\))?:'
           } > release-notes.md
           # tarball：配方世代（单构建）→ 资产名 = tag + -linux-x86_64.tar.gz（主仓
-          # deploy/README.md 口径），内层目录名 = DIST；老世代回退（逐形态）→ 每形态
+          # .github/deploy/README.md 口径），内层目录名 = DIST；老世代回退（逐形态）→ 每形态
           # 一份，目录名 = 形态前缀 + 版本段。
-          # 语料必须是运行时资产：渠道探活（channel_test）从
-          # config/prompt-templates.jsonl 读提问语料，二进制不内嵌它
-          # （见 control_plane::prompt_templates::load_templates）。
-          # 漏打它 → 裸机部署解压即用、但探活报「no prompt template available」。
           mkdir -p dist
           while IFS='|' read -r form _; do
             [ -n "$form" ] || continue
@@ -260,9 +236,7 @@ jobs:
             else
               ADIST="ferrite-${form}-${DIST#ferrite-}"
             fi
-            mkdir -p "dist/${ADIST}/config"
             cp "out-bin/ferrite-${form}" "dist/${ADIST}/"
-            cp config/prompt-templates.jsonl "dist/${ADIST}/config/"
             tar -czf "dist/${ADIST}-linux-x86_64.tar.gz" -C dist "${ADIST}"
             rm -rf "dist/${ADIST}"
           done < shapes.txt
@@ -273,65 +247,11 @@ jobs:
           du -h dist/*.tar.gz
         id: pkg
 
-      # ---- Android debug APK（apps|platforms/mobile；命令序列 = W6 spike 实测配方）----
-      - name: 装 Java 17（Android 构建链）
-        if: inputs.mobile == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      # 原生壳已随主仓删除（harness 出仓后编不过，见 ferrite#757）：移动产物的
-      # wasm/capacitor 打包链不在 release 里构建；bun / wasm32 / dioxus-cli 全部退役。
-
-      - name: Android 工具链（SDK / NDK 三变量 / aarch64 target）
-        if: inputs.mobile == 'true'
-        run: |
-          set -euo pipefail
-          # runner 预装 Android SDK；NDK 取版本号最大的一个（spike 实测路径形态）。
-          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          test -d "$SDK" || { echo "Android SDK 不在 $SDK"; exit 1; }
-          NDK="$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1)"
-          test -n "$NDK" || { echo "NDK 缺失（$SDK/ndk/*）"; exit 1; }
-          {
-            echo "ANDROID_HOME=$SDK"
-            echo "ANDROID_SDK_ROOT=$SDK"
-            echo "NDK_HOME=$NDK"
-            echo "ANDROID_NDK_HOME=$NDK"
-            echo "ANDROID_NDK_ROOT=$NDK"
-          } >> "$GITHUB_ENV"
-          rustup target add aarch64-linux-android
-          # 证据：选定 NDK 的版本串（spike 报告 §F 同口径）
-          grep -E '^Pkg\.Revision' "$NDK/source.properties"
-
-      - name: 构建 Android debug APK
-        if: inputs.mobile == 'true'
-        run: |
-          set -euo pipefail
-          shell_root=$([ -d platforms ] && echo platforms || echo apps)
-          if [ "$shell_root" = "apps" ]; then
-            mobile_dir="apps/coder-mobile"
-          else
-            mobile_dir="platforms/mobile"
-          fi
-          cd "$mobile_dir"
-          SPEC="${{ steps.pkg.outputs.dist }}"
-          SPEC="${SPEC#ferrite-}"
-          bun install
-          bunx tauri android init --ci
-          bunx tauri android build --debug --apk --target aarch64
-          APK="src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
-          test -f "$APK" || { echo "APK 未产出：$APK"; exit 1; }
-          cp "$APK" "../../dist/ferrite-mobile-${SPEC}.apk"
-          # 证据行：路径 + 体积 + sha256（不 echo 产物内容）
-          sha256sum "../../dist/ferrite-mobile-${SPEC}.apk"
-          du -h "../../dist/ferrite-mobile-${SPEC}.apk"
-
       # ---- 容器镜像（GHCR）----
-      # Dockerfile 与镜像坐标来自「读取发布配方」步骤（单一来源 = 主仓 deploy/ 树；
-      # 老 ref 回退旧 deploy/{api,web} 路径）。把它们接在发布链上，让「别人 docker
-      # compose up 就能用」成立——deploy/compose.yml 的 image 字段与配方
-      # image_registry / image_tag 同源，主仓 deploy/README.md 有约束说明。
+      # Dockerfile 与镜像坐标来自「读取发布配方」步骤（单一来源 = 主仓
+      # .github/deploy/ 树；老 ref 回退旧 deploy/{api,web} 路径）。把它们接在发布链上，
+      # 让「别人 docker compose up 就能用」成立——.github/deploy/compose.yml 的 image
+      # 字段与配方 image_registry / image_tag 同源，主仓 .github/deploy/README.md 有约束说明。
       #
       # tag 口径与 compose 期望一致：server → IMAGE_TAG（当前 :latest），其余形态用
       # 形态名；每个镜像另打一个版本 tag，便于回溯某个 release 用了哪些镜像。
@@ -401,10 +321,6 @@ jobs:
               [ -n "$form" ] || continue
               ASSETS+=("dist/ferrite-${form}-${SPEC}-linux-x86_64.tar.gz")
             done < shapes.txt
-          fi
-          if [[ "${{ inputs.mobile }}" == "true" ]]; then
-            test -f "dist/ferrite-mobile-${SPEC}.apk" || { echo "缺少移动资产 dist/ferrite-mobile-${SPEC}.apk"; exit 1; }
-            ASSETS+=("dist/ferrite-mobile-${SPEC}.apk")
           fi
           # 同一口径同步两侧：缺失则创建（资产 + 标题 + notes），已存在则 clobber 资产并对齐 notes。
           # 主仓用 FERRITE_PAT（跨仓），壳仓用本 workflow 的 github.token（仅本仓写权）。
