@@ -144,16 +144,14 @@ jobs:
           # pkgs_resolved 的保守值是 false：它区分「算出来就是空闭包」与「推不出」。
           # 分不开时壳仓只能一律保守，纯 CI 改动的合并就白付一次全仓 clippy（实测 204s）。
           pkgs_resolved="$(printf '%s\n' "$out" | sed -n 's/^pkgs_resolved=//p')"; pkgs_resolved="${pkgs_resolved:-false}"
-          ui_contracts="$(printf '%s\n' "$out" | sed -n 's/^ui_contracts=//p')"; ui_contracts="${ui_contracts:-true}"
           db_migrations="$(printf '%s\n' "$out" | sed -n 's/^db_migrations=//p')"; db_migrations="${db_migrations:-true}"
-          echo ">>> rules=$rules rust=$rust api_forms=$api_forms ui_contracts=$ui_contracts db_migrations=$db_migrations pkgs_resolved=$pkgs_resolved pkgs='${pkgs:-（空）}'"
+          echo ">>> rust=$rust api_forms=$api_forms db_migrations=$db_migrations pkgs_resolved=$pkgs_resolved pkgs='${pkgs:-（空）}'"
           {
             echo "rules=$rules"
             echo "rust=$rust"
             echo "pkgs=$pkgs"
             echo "api_forms=$api_forms"
             echo "pkgs_resolved=$pkgs_resolved"
-            echo "ui_contracts=$ui_contracts"
             echo "db_migrations=$db_migrations"
           } >> "$GITHUB_OUTPUT"
 
@@ -257,30 +255,6 @@ jobs:
 
       # ui-components 契约测试显式全跑：testless 的函数级影响分析看不见纯数据
       # const（TOKEN_GROUPS）与 asset CSS 的 diff，快关会漏选 theme/style 契约。
-      # 包名自适应：主仓 main 与在途分支可能分别处于 ui-kit / ui-components 两个
-      # 世代（改名随前端分层重构迁移），硬编码任一名字都会把另一侧的 PR 快关
-      # 卡死在 "package did not match any packages"。问 cargo metadata 要真身。
-      # 两个世代都不在树上（前端分层重构未合入的过渡树）时必须显式跳过：
-      # grep 无命中在 set -euo pipefail 下同样会把整步带红，exit 0 才是真跳过。
-      # mono main 合入 #249 后本 step 自动恢复执行。
-      # 门控判据是「ui-components 在不在改动包 ∪ 反向依赖闭包里」。它守 ui 组件契约与
-      # asset 清单，原先按「testless 看不见资产 diff」无条件跑；但**按包的闭包看得见**：
-      # ui-components 依赖 ui-styles，所以改 crates/ui-styles/assets/** 时它也进面
-      # （实测 closure({ui-styles}) 含 ui-components）。保守值是 true。
-      - name: ui-kit/ui-components 契约测试
-        if: steps.scope.outputs.mode != 'docs-only' && steps.flags.outputs.ui_contracts == 'true'
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          PKG=$(cargo metadata --format-version 1 --no-deps | jq -r '[.packages[].name] | map(select(. == "ui-kit" or . == "ui-components")) | first // empty')
-          if [ -z "$PKG" ]; then
-            echo ">>> 树上没有 ui-kit / ui-components（前端分层重构尚未合入 main）；"
-            echo ">>> kit 契约测试按包缺席跳过，#249 合入后本 step 自动恢复执行。"
-            exit 0
-          fi
-          echo "kit contract gate: package = $PKG"
-          cargo test -p "$PKG" --tests --profile ci
-
       # wasm32 编译门禁已随前端替换退役：scripts/wasm-check.sh 的编译目标
       # （admin-web 等 Dioxus 包）随主仓 #752 删除，Svelte 世代没有 wasm
       # 编译目标。壳仓侧不再 fetch base / 装 wasm32 目标 / 调用脚本——
@@ -290,7 +264,7 @@ jobs:
       # testless 看不见 db/migrations 纯数据目录的 diff，#41 撞号（两个 0023）
       # 从快关漏过、把 main 弄红，这里无条件跑死。
       # 包名自适应：主仓 main 与在途分支可能分别处于 db / app-db 两个世代
-      # （单例 crate 加 app- 前缀的改名波次，同 ui-kit step 的时序耦合病），
+      # （单例 crate 加 app- 前缀的改名波次），
       # 硬编码任一名字都会把另一侧的 PR 快关卡死在 "package did not match
       # any packages"。问 cargo metadata 要真身；两个世代都不在树上（改名中间态）
       # 时显式跳过并说明，不静默绿也不无谓带红。
@@ -316,7 +290,7 @@ jobs:
       # 别名被改坏（如误把 tavern 塞进 ferrite-local）只有这里能红——cargo 的
       # feature 统一（#10266）也让它们绝不能进共享 crate。别名收敛成单形态
       # （tavern 删除后）时改查另外两种配置：default 与 --no-default-features。
-      # 判定问 cargo metadata 要真身（同 ui-kit step 的世代自适应风格）。
+      # 判定问 cargo metadata 要真身。
       # 形态检查跑 `cargo check -p api --no-default-features --features <别名>` × N，实测 99s。
       # 形态是 api 的 feature 面，只有 api 自身、或它（传递地）依赖的东西变了才可能红 ——
       # 而 `api_forms` 判的正是「api 是否落在改动包 ∪ 反向依赖闭包里」。保守值是 true。
