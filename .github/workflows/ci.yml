@@ -945,9 +945,9 @@ jobs:
           set -euo pipefail
           mv "$GITHUB_WORKSPACE/rust-specs" "$RUNNER_TEMP/rust-specs"
 
-      # 准备门禁规则：复制 rust-specs 的全部 lint（通用语法 8 条 + dioxus 10 条）。
-      # 2026-11-05：pick-outside-rsx 与 dioxus-rsx-no-if-else 随 ferrite 退役
-      # util::pick 从 rust-specs 删除，本清单同步移除。
+      # 准备门禁规则：复制 rust-specs 的通用语法 lint（8 条）。
+      # dioxus-* 专属规则随 ferrite 前端退役（Svelte 替换）不再门禁：它们的
+      # crate 名作用域（ui_* / web）已不存在，零 finding 纯空转编译。
       # 早先这里只复制 6 条，且 dylint 命令行缺少 --all 与具体 lint 名，
       # late lint 从未被真正启用——门禁一直空转。现在复制全量并按 lint ID 判定。
       - name: 准备门禁规则（复制全部 lint）
@@ -961,11 +961,7 @@ jobs:
           missing=0
           for name in ban-unwrap chainable-single-statement consecutive-same-shape-loops \
             early-return-needs-no-else expect-in-non-result let-if-else max-nesting-depth \
-            redundant-branch-closures dioxus-effect-self-loop \
-            dioxus-globalsignal-discipline dioxus-layer-direction dioxus-ownership-imports \
-            dioxus-props-contract dioxus-rsx-avoid-control-flow dioxus-rsx-cjk-text \
-            dioxus-rsx-list-key dioxus-rsx-nesting \
-            dioxus-rsx-one-per-component
+            redundant-branch-closures
           do
             if [ ! -d "$RUNNER_TEMP/rust-specs/lints/$name" ]; then
               echo "::error title=rust-specs lint 缺失::$name 不在 rust-specs main 上；先合并对应的 rust-specs PR"
@@ -988,29 +984,14 @@ jobs:
           do
             cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
           done
-          # dioxus lint：自带 crate 名作用域判断（ui_* 与 web），对后端 crate 不产生 finding。
-          for name in \
-            dioxus-effect-self-loop \
-            dioxus-globalsignal-discipline \
-            dioxus-layer-direction \
-            dioxus-ownership-imports \
-            dioxus-props-contract \
-            dioxus-rsx-avoid-control-flow \
-            dioxus-rsx-cjk-text \
-            dioxus-rsx-list-key \
-            dioxus-rsx-nesting \
-            dioxus-rsx-one-per-component
-          do
-            cp -r "$RUNNER_TEMP/rust-specs/lints/$name" "$GATED/$name"
-          done
           # 复制 toolchain 文件：lint 库构建用 `cargo build`，没有这个文件会落到
           # 默认 stable，而 clippy_utils 的 git 版本只兼容 nightly-2026-08-20。
           cp "$RUNNER_TEMP/rust-specs/rust-toolchain.toml" "$GATED/rust-toolchain.toml"
           ls -1 "$GATED"
-          # dioxus lint 的 Cargo.toml 用 `../../support/...` 相对路径引用共享 crate
-          # （dioxus-lint-scope / dioxus-lint-paths / dioxus-rsx-scan）。复制到
-          # $GATED 后该层级变成 $RUNNER_TEMP/support，必须一并复制，否则
-          # `cargo build` 报 "no matching package named dioxus-lint-scope"。
+          # 通用 lint 的 Cargo.toml 用 `../../support/...` 相对路径引用共享 crate
+          # （lint-scope / lint-paths / rsx-scan 等支持 crate）。复制到 $GATED 后
+          # 该层级变成 $RUNNER_TEMP/support，必须一并复制，否则 `cargo build`
+          # 报 "no matching package named ..."。
           cp -r "$RUNNER_TEMP/rust-specs/support" "$RUNNER_TEMP/support"
 
       - name: 装 Rust 工具链（仓 rust-toolchain.toml 钉死 nightly-2026-08-20）
@@ -1174,15 +1155,12 @@ jobs:
           # 判定按 lint ID（JSON 诊断的 code 字段），不匹配报错文案——
           # 文案一改正则就失效，门禁会静默变绿。
           #
-          # 分级：通用语法 7 条全部阻断；dioxus 10 条中只有已达成共识的
-          # layer-direction / globalsignal-discipline 阻断，其余
-          # （rsx-nesting 等架构级规则）只报告不阻断——它们的存量规模大
-          # （rsx-nesting 在 ui-components 单 crate 就有 134 条），
-          # 一次性阻断会让所有 UI 改动都推不动。
+          # 分级：通用语法 8 条全部阻断。
+          # dioxus-* 规则随 ferrite 前端退役（Svelte 替换）不再门禁（见上文清单）。
           # （no-if-else / pick-outside-rsx 已随 ferrite 退役 util::pick 删除。）
           LINT_FLAGS=""
           LINT_ALLOW=""
-          BLOCKING_LINTS="ban_unwrap,chainable_single_statement,consecutive_same_shape_loops,early_return_needs_no_else,expect_in_non_result,let_if_else,max_nesting_depth,redundant_branch_closures,dioxus_layer_direction,dioxus_globalsignal_discipline"
+          BLOCKING_LINTS="ban_unwrap,chainable_single_statement,consecutive_same_shape_loops,early_return_needs_no_else,expect_in_non_result,let_if_else,max_nesting_depth,redundant_branch_closures"
           for name in \
             ban_unwrap \
             chainable_single_statement \
@@ -1191,17 +1169,7 @@ jobs:
             expect_in_non_result \
             let_if_else \
             max_nesting_depth \
-            redundant_branch_closures \
-            dioxus_effect_self_loop \
-            dioxus_globalsignal_discipline \
-            dioxus_layer_direction \
-            dioxus_ownership_imports \
-            dioxus_props_contract \
-            dioxus_rsx_avoid_control_flow \
-            dioxus_rsx_cjk_text \
-            dioxus_rsx_list_key \
-            dioxus_rsx_nesting \
-            dioxus_rsx_one_per_component
+            redundant_branch_closures
           do
             LINT_FLAGS="$LINT_FLAGS -D $name"
             LINT_ALLOW="$LINT_ALLOW,$name"
@@ -1216,7 +1184,7 @@ jobs:
           done
           # 一次调用扫全部改动成员，而不是每个包起一次 cargo。
           # 实测 run 41602562540：19 个包串行 659s（coder-host 114s、coder-tools 95s、
-          # mcp-bin 78s …），每次调用都要重新加载 20 个 lint 库，cargo 也无法跨包并行。
+          # mcp-bin 78s …），每次调用都要重新加载 8 个 lint 库，cargo 也无法跨包并行。
           # 多个 `-p` 是 cargo-dylint 自己的 clap 定义（`-p, --package <SPEC>`，可重复）；
           # 已在两 crate 的 fixture 上实测：单次 `-p a -p b` 出一条 JSON 流、两个包的
           # finding 都在（a/src/lib.rs 与 b/src/lib.rs 各 1 条），退出码与 -- 之前的
